@@ -1,0 +1,20 @@
+{
+  // Type-check only. Node runs the .ts files directly by stripping the types (no build step), so only
+  // "erasable" TypeScript is allowed: no enums, namespaces or parameter properties, and type-only imports
+  // must say `import type`.
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src", "scripts", "test"]
+}

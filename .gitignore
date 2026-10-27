@@ -1,0 +1,18 @@
+node_modules/
+data/*.db*
+uploads/
+logs/
+data/amfi_navs.json
+# Production state (real investors: DB, uploads, FP call logs). Never commit.
+state-production/
+test/.last_user.json
+data/pg/
+data/pg.lock
+
+# Secrets: never commit (the real .env lives one folder up, or in AWS Parameter Store)
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key

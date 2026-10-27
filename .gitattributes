@@ -1,0 +1,4 @@
+# Unix line endings everywhere: this code runs on Linux servers (shell scripts break with CRLF)
+* text=auto eol=lf
+*.png binary
+*.jpg binary

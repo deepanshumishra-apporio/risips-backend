@@ -1,0 +1,21 @@
+{
+  "_note": "Promos shown in the app (Figma 8:8908 modal, 8:8936 home banner, REWARDS notification). Copy is the Figma placeholder until marketing supplies the real offer: 'Up to ₹2,000 back in rewards' is NOT a real offer yet. Set active=false to hide a promo. Dates are IST, inclusive.",
+  "promos": [
+    {
+      "id": "festive-2026",
+      "active": true,
+      "from": "2026-09-20",
+      "to": "2026-11-15",
+      "tag": "FESTIVE OFFER",
+      "title": "Invest this festive season, unlock rewards",
+      "body": "Start or step up a SIP and earn exclusive rewards on every instalment — all season long.",
+      "highlight": "Up to ₹2,000 back in rewards",
+      "cta": "Start a SIP",
+      "route": "/collection/foryou?mode=sip",
+      "banner_title": "Festive rewards on SIPs",
+      "banner_body": "Invest this season & unlock rewards",
+      "notification_title": "Festive rewards on SIPs are live",
+      "notification_body": "Start or step up a SIP this season to unlock exclusive rewards."
+    }
+  ]
+}

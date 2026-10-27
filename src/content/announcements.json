@@ -1,0 +1,4 @@
+{
+  "_note": "Announcements for the Notifications list (Figma 8:8860). tag: NEW FUND | MAINTENANCE | MARKET | ACTION NEEDED | REWARDS. 'at' is when it was posted (IST date or ISO time); it shows from 'at' until 'to'. route (optional) is an app route opened on tap, e.g. /fund/INF109K01423. Leave the list empty until there is something real to announce. Example: {\"id\":\"maint-2026-10-04\",\"tag\":\"MAINTENANCE\",\"title\":\"Scheduled maintenance, 4 Oct\",\"body\":\"The app may be briefly unavailable between 2:00–4:00 AM.\",\"at\":\"2026-10-01\",\"to\":\"2026-10-04\"}",
+  "items": []
+}
