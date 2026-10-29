@@ -8,6 +8,7 @@ import { sleep } from '../utils/async.ts';
 import { log } from '../utils/logger.ts';
 import { redact } from '../utils/redact.ts';
 import type { FpObject } from '../types/domain.ts';
+import type { FpModel } from './fp.schemas.ts';
 
 type Kind = 'fp' | 'pv';
 /** One request/response in the API log. */
@@ -19,10 +20,12 @@ export interface TraceEntry {
  * whole polling budget (seen 2026-10-22: one sandbox poll hung for the full 45 s).
  */
 export interface CallOptions { label?: string; quiet?: boolean; timeoutMs?: number }
+/** `as`: the model of the reply (fp.schemas.ts). The reply is checked against it and typed by it. */
+export type TypedOptions<T> = CallOptions & { as?: FpModel<T> };
 const REQUEST_TIMEOUT_MS = 45000;
 const POLL_TIMEOUT_MS = 10000;
-/** FP's reply: JSON when it parses, else the raw text. */
- 
+/** FP's reply to an endpoint without a model: JSON when it parses, else the raw text. Prefer a model (`as`). */
+
 export type FpJson = any;
 
 fs.mkdirSync(paths.logs, { recursive: true });
@@ -67,13 +70,18 @@ export class FpError extends Error {
   /** HTTP status; 0 = no response at all. */
   declare status: number;
   declare body: FpJson;
-  constructor(message: string, status: number, body: FpJson) {
+  /** A 2xx reply that lacks what its model requires (fp.schemas.ts `core`). */
+  declare malformed: boolean;
+  constructor(message: string, status: number, body: FpJson, { malformed = false } = {}) {
     super(message);
     this.status = status;
     this.body = body;
+    this.malformed = malformed;
   }
   get userMessage(): string {
     if (this.unreachable) return 'Can’t reach the fund platform right now. Please try again in a minute.';
+    // FP may have acted on the request (an order created), so say to look before trying again
+    if (this.malformed) return 'The fund platform sent an unexpected reply. Please check Orders before trying again.';
     const e = this.body?.error;
     // "Validation failed. 1 error(s)" says nothing; the field-level message says what to fix
     const field = e?.errors?.[0]?.message;
@@ -132,21 +140,59 @@ async function call(kind: Kind, method: string, p: string, body?: unknown, { lab
   return { status: r!.status, json };
 }
 
-/** Throws FpError on non-2xx. */
-async function must(kind: Kind, method: string, p: string, body: unknown, opts?: CallOptions): Promise<FpJson> {
-  const r = await call(kind, method, p, body, opts);
-  if (r.status >= 300) throw new FpError(`${method} ${p} failed (HTTP ${r.status})`, r.status, r.json);
-  return r.json;
+/** Fields that differ from the model, logged once per model + field (FP changing a shape shows up without flooding). */
+const drift = new Set<string>();
+
+/**
+ * Checks an FP reply against its model and returns it typed (unchanged: unmodelled fields are kept). Missing `core`
+ * fields throw a `malformed` FpError; any other mismatch is logged once and let through.
+ */
+export function asModel<T>(m: FpModel<T>, json: unknown, { label, status = 200 }: { label?: string; status?: number } = {}): T {
+  const core = m.core.safeParse(json);
+  if (!core.success) {
+    const where = core.error.issues.map((i) => `${i.path.join('.') || '(reply)'}: ${i.message}`).slice(0, 5).join('; ');
+    log.error(`FP sent an unexpected ${m.name}`, { label, where });
+    throw new FpError(`FP sent an unexpected ${m.name} (${where})`, status, null, { malformed: true });
+  }
+  const full = m.full.safeParse(json);
+  if (!full.success) {
+    for (const i of full.error.issues) {
+      // array indexes vary from reply to reply; the field is what matters
+      const key = `${m.name}:${i.path.filter((x) => typeof x !== 'number').join('.')}`;
+      if (drift.has(key)) continue;
+      drift.add(key);
+      log.warn(`FP ${m.name} differs from its documented shape`, { label, field: i.path.join('.'), problem: i.message });
+    }
+  }
+  return json as T;
 }
 
+/** asModel for a best-effort read (a status refresh): null instead of a throw when the reply lacks its core fields. */
+export function asModelOrNull<T>(m: FpModel<T>, json: unknown, o: { label?: string; status?: number } = {}): T | null {
+  try {
+    return asModel(m, json, o);
+  } catch {
+    return null;
+  }
+}
+
+/** Throws FpError on non-2xx, and (with `as`) on a reply without its model's core fields. */
+async function must<T>(kind: Kind, method: string, p: string, body: unknown, opts?: TypedOptions<T>): Promise<T> {
+  const r = await call(kind, method, p, body, opts);
+  if (r.status >= 300) throw new FpError(`${method} ${p} failed (HTTP ${r.status})`, r.status, r.json);
+  return opts?.as ? asModel(opts.as, r.json, { label: opts.label || `${method} ${p.split('?')[0]}`, status: r.status }) : r.json;
+}
+
+// T defaults to FpJson (untyped) for endpoints without a model; pass `as` to get a checked, typed reply.
 export const fp = {
-  get: (p: string, o?: CallOptions) => must('fp', 'GET', p, undefined, o),
-  post: (p: string, b: unknown, o?: CallOptions) => must('fp', 'POST', p, b, o),
-  patch: (p: string, b: unknown, o?: CallOptions) => must('fp', 'PATCH', p, b, o),
-  put: (p: string, b: unknown, o?: CallOptions) => must('fp', 'PUT', p, b, o),
+  get: <T = FpJson>(p: string, o?: TypedOptions<T>) => must<T>('fp', 'GET', p, undefined, o),
+  post: <T = FpJson>(p: string, b: unknown, o?: TypedOptions<T>) => must<T>('fp', 'POST', p, b, o),
+  patch: <T = FpJson>(p: string, b: unknown, o?: TypedOptions<T>) => must<T>('fp', 'PATCH', p, b, o),
+  put: <T = FpJson>(p: string, b: unknown, o?: TypedOptions<T>) => must<T>('fp', 'PUT', p, b, o),
+  /** Any status, no throw: check `status` yourself, then asModel() the json. */
   raw: (m: string, p: string, b?: unknown, o?: CallOptions) => call('fp', m, p, b, o),
 };
 export const pv = {
-  get: (p: string, o?: CallOptions) => must('pv', 'GET', p, undefined, o),
-  post: (p: string, b: unknown, o?: CallOptions) => must('pv', 'POST', p, b, o),
+  get: <T = FpJson>(p: string, o?: TypedOptions<T>) => must<T>('pv', 'GET', p, undefined, o),
+  post: <T = FpJson>(p: string, b: unknown, o?: TypedOptions<T>) => must<T>('pv', 'POST', p, b, o),
 };

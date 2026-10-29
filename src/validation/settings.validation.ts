@@ -1,8 +1,11 @@
 import { z } from 'zod';
 import { pin, txnOtp } from './common.ts';
 import { DELETION_REASONS, NOTIFY_KEYS } from '../services/settings.service.ts';
+import { onboardingSchemas } from './onboarding.validation.ts';
 
 export const settingsSchemas = {
+  /** Profile > Nominee: the same fields and checks as the onboarding nominee step. */
+  nominee: onboardingSchemas.nominee,
   notifyPrefs: {
     body: z.record(z.string(), z.unknown()).superRefine((b, ctx) => {
       for (const [k, v] of Object.entries(b)) {

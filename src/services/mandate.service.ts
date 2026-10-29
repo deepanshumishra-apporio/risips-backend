@@ -1,12 +1,13 @@
 // AutoPay mandates (UPI AutoPay / eNACH): later SIP instalments are debited from them.
 import { config } from '../config/env.ts';
 import { usersRepo } from '../db/repositories/users.repository.ts';
-import { fp } from '../integrations/fp.client.ts';
+import { asModelOrNull, fp } from '../integrations/fp.client.ts';
+import { CreatedMandate, FpMandate, MandateAuth } from '../integrations/fp.schemas.ts';
 import { ApiError } from '../utils/errors.ts';
 import { requireInvestor } from './orders.service.ts';
-import type { FpObject, Mandate, User } from '../types/domain.ts';
+import type { Mandate, User } from '../types/domain.ts';
 
-const mandateView = (m: FpObject | null): Mandate | null => m && ({
+const mandateView = (m: FpMandate | null): Mandate | null => m && ({
   id: m.id, status: m.mandate_status, type: m.mandate_type, limit: m.mandate_limit, umrn: m.umrn || null,
   valid_from: m.valid_from, valid_to: m.valid_to, created_at: m.created_at, bank_account_id: m.bank_account_id,
 });
@@ -17,7 +18,9 @@ export async function currentMandate(user: User): Promise<Mandate | null> {
   if (!m?.id) return null;
   const f = await fp.raw('GET', `/api/pg/mandates/${m.id}`, undefined, { label: 'mandate status' });
   if (f.status !== 200) return m;
-  const next = { ...m, ...mandateView(f.json) };
+  const fresh = mandateView(asModelOrNull(FpMandate, f.json, { label: 'mandate status' }));
+  if (!fresh) return m;
+  const next = { ...m, ...fresh };
   await usersRepo.merge(user.id, { mandate: next });
   return next;
 }
@@ -41,13 +44,13 @@ export async function createMandate(user: User, b: { type: 'UPI' | 'E_MANDATE'; 
   if (!m || m.status !== 'CREATED' || m.type !== type || usable) {
     const created = await fp.post('/api/pg/mandates', {
       mandate_type: type, bank_account_id: ids.bank_old_id, mandate_limit: type === 'UPI' ? Math.min(limit, 100000) : limit, provider_name: 'CYBRILLAPOA',
-    }, { label: 'mandate: create' });
-    m = mandateView(await fp.get(`/api/pg/mandates/${created.id}`, { label: 'mandate: fetch' })) || { id: created.id, status: 'CREATED', type };
+    }, { label: 'mandate: create', as: CreatedMandate });
+    m = mandateView(await fp.get(`/api/pg/mandates/${created.id}`, { label: 'mandate: fetch', as: FpMandate })) || { id: created.id, status: 'CREATED', type };
     await usersRepo.merge(user.id, { mandate: m });
   }
   const a = await fp.post('/api/pg/payments/emandate/auth', {
     mandate_id: m.id, payment_postback_url: `${config.publicUrl}/mandate/return?mandate=${m.id}`,
-  }, { label: 'mandate: authorisation link' });
+  }, { label: 'mandate: authorisation link', as: MandateAuth });
   await usersRepo.merge(user.id, { mandate: { ...m, auth_url: a.token_url } });
   return { mandate: m, auth_url: a.token_url, return_url_prefix: `${config.publicUrl}/mandate/return` };
 }

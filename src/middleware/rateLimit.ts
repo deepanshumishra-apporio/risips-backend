@@ -29,7 +29,8 @@ function limiter(name: string, { windowMs, limit, key }: { windowMs: number; lim
   });
 }
 
-const byIp = (req: Request) => ipKeyGenerator(req.ip || '0.0.0.0');
+// App Service adds the client's port to the forwarded address, which would make every request look like a new client.
+const byIp = (req: Request) => ipKeyGenerator(String(req.ip || '0.0.0.0').replace('::ffff:', '').replace(/^(\d+\.\d+\.\d+\.\d+):\d+$/, '$1'));
 // per-user limits run after requireAuth; fall back to the IP if one is ever mounted before it
 const byUser = (req: Request) => (req.user ? `u${req.user.id}` : byIp(req));
 const field = (req: Request, k: string) => String((req.body as Record<string, unknown> | undefined)?.[k] ?? '').trim().toLowerCase().slice(0, 100);
@@ -42,12 +43,16 @@ export const limits = {
   /** Webhooks come from FP's few servers, in bursts. */
   webhook: limiter('webhook', { windowMs: MIN, limit: 600, key: byIp }),
 
-  otpSendIp: limiter('otp-ip', { windowMs: 15 * MIN, limit: 10, key: byIp }),
-  otpSendEmail: limiter('otp-email', { windowMs: 15 * MIN, limit: 5, key: (req) => field(req, 'email') || byIp(req) }),
-  otpSendUser: limiter('otp-user', { windowMs: 15 * MIN, limit: 8, key: byUser }),
-  otpVerify: limiter('otp-verify', { windowMs: 15 * MIN, limit: 20, key: byIp }),
+  // The JS backend's numbers: testers (and an office or carrier NAT) share one IP. Per destination, otp.service.ts also
+  // allows one code per 30 s and 20 an hour, and at most 10 wrong codes an hour across codes.
+  otpSendIp: limiter('otp-ip', { windowMs: 60 * MIN, limit: 20, key: byIp }),
+  otpSendEmail: limiter('otp-email', { windowMs: 60 * MIN, limit: 20, key: (req) => field(req, 'email') || byIp(req) }),
+  otpSendUser: limiter('otp-user', { windowMs: 60 * MIN, limit: 60, key: byUser }),
+  otpVerify: limiter('otp-verify', { windowMs: 60 * MIN, limit: 60, key: byIp }),
+  /** Signed-in code checks (mobile, Aadhaar): per user, so one office IP doesn't share a budget. */
+  otpVerifyUser: limiter('otp-verify-user', { windowMs: 60 * MIN, limit: 60, key: byUser }),
 
   pin: limiter('pin', { windowMs: 15 * MIN, limit: 10, key: byUser }),
-  kycCheck: limiter('kyc', { windowMs: 60 * MIN, limit: 10, key: byUser }),
+  kycCheck: limiter('kyc', { windowMs: 60 * MIN, limit: 30, key: byUser }),
   money: limiter('money', { windowMs: 10 * MIN, limit: 30, key: byUser }),
 };

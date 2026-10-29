@@ -2,13 +2,14 @@
 import crypto from 'node:crypto';
 import { ordersRepo } from '../db/repositories/orders.repository.ts';
 import { fp } from '../integrations/fp.client.ts';
+import { HoldingsReport, listOf, MfSwitch, MfSwitchPlan } from '../integrations/fp.schemas.ts';
 import { poll } from '../utils/async.ts';
 import { ApiError } from '../utils/errors.ts';
 import { scheme, summary } from './catalog.service.ts';
 import { requireTxnOtp } from './otp.service.ts';
 import { consentFor, freeValue, ownOrder, planFailText, requireInvestor } from './orders.service.ts';
 import type { Ctx } from './orders.service.ts';
-import type { FpObject, Order, User } from '../types/domain.ts';
+import type { Instalment, Order, User } from '../types/domain.ts';
 
 export const STATUS: Record<string, string> = {
   created: 'Setting up', review_completed: 'Not started', confirmed: 'Activating', submitted: 'Activating',
@@ -28,11 +29,11 @@ export const planView = (o: Order) => {
 };
 
 export async function refreshPlan(o: Order): Promise<Order> {
-  const f = await fp.get(`/v2/mf_switch_plans/${o.id}`, { label: 'refresh STP' });
+  const f = await fp.get(`/v2/mf_switch_plans/${o.id}`, { label: 'refresh STP', as: MfSwitchPlan });
   let installments = o.data.installments || [];
   try {
-    const l = await fp.get(`/v2/mf_switches?plan=${o.id}`, { label: 'STP installments' });
-    installments = (l.data || []).map((x: FpObject) => ({
+    const l = await fp.get(`/v2/mf_switches?plan=${o.id}`, { label: 'STP installments', as: listOf(MfSwitch) });
+    installments = l.data.map((x): Instalment => ({
       id: x.id, old_id: x.old_id, state: x.state, amount: x.amount ?? x.switched_out_amount, scheduled_on: x.scheduled_on, traded_on: x.traded_on || null,
       units_out: x.switched_out_units, units_in: x.switched_in_units, failure_code: x.failure_code,
     }));
@@ -65,8 +66,8 @@ export async function startStp(ctx: Ctx, b: { from_isin: string; to_isin: string
   const day = b.day;
   if (!from.stp.dates.includes(day) || !to.stp.dates.includes(day)) throw new ApiError(400, 'Choose a transfer date between 1 and 28.');
   // ONDC's review does not check holdings (a plan on units the folio doesn't have reaches `active`), so we do.
-  const rep = await fp.get(`/api/oms/reports/holdings?folios=${encodeURIComponent(folio)}`, { label: 'STP: source holding' });
-  const held = rep.folios?.flatMap((f: FpObject) => f.schemes || []).find((s: FpObject) => s.isin === from.isin);
+  const rep = await fp.get(`/api/oms/reports/holdings?folios=${encodeURIComponent(folio)}`, { label: 'STP: source holding', as: HoldingsReport });
+  const held = (rep.folios ?? []).flatMap((f) => f.schemes ?? []).find((s) => s.isin === from.isin);
   const value = await freeValue(ctx.user.id, folio, from.isin, Number(held?.market_value?.redeemable_amount ?? held?.market_value?.amount ?? 0));
   if (value < amount) throw new ApiError(400, `You hold ₹${Math.floor(value).toLocaleString('en-IN')} in this fund, less than one transfer.`);
 
@@ -77,9 +78,9 @@ export async function startStp(ctx: Ctx, b: { from_isin: string; to_isin: string
     amount, frequency: 'monthly', installment_day: day, number_of_installments: installments, systematic: true,
     auto_generate_installments: true, initiated_by: 'investor', initiated_via: 'mobile_app', user_ip: ctx.ip,
     source_ref_id: `risips-stp-${ctx.user.id}-${crypto.randomBytes(4).toString('hex')}`,
-  }, { label: 'STP: create plan' });
+  }, { label: 'STP: create plan', as: MfSwitchPlan });
   await ordersRepo.upsert({ id: p.id, ...meta, state: p.state, data: { fp: p, twofa } });
-  p = await poll(() => fp.get(`/v2/mf_switch_plans/${p.id}`, { quiet: true }), (x) => x.state !== 'created', { every: 2000, max: 45000 });
+  p = await poll(() => fp.get(`/v2/mf_switch_plans/${p.id}`, { quiet: true, as: MfSwitchPlan }), (x) => x.state !== 'created', { every: 2000, max: 45000 });
   if (p.state !== 'review_completed') {
     await ordersRepo.upsert({ id: p.id, ...meta, state: p.state, data: { fp: p } });
     throw new ApiError(422, p.state === 'created'
@@ -87,8 +88,8 @@ export async function startStp(ctx: Ctx, b: { from_isin: string; to_isin: string
       : planFailText('STP', p.reason));
   }
   // consent + confirmed in one call, as for SIP plans
-  p = await fp.patch('/v2/mf_switch_plans', { id: p.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: 'STP: consent + confirm' });
-  p = await poll(() => fp.get(`/v2/mf_switch_plans/${p.id}`, { quiet: true }), (x) => !['confirmed', 'submitted'].includes(x.state), { every: 2000, max: 30000 });
+  p = await fp.patch('/v2/mf_switch_plans', { id: p.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: 'STP: consent + confirm', as: MfSwitchPlan });
+  p = await poll(() => fp.get(`/v2/mf_switch_plans/${p.id}`, { quiet: true, as: MfSwitchPlan }), (x) => !['confirmed', 'submitted'].includes(x.state), { every: 2000, max: 30000 });
   const saved = await ordersRepo.upsert({ id: p.id, ...meta, state: p.state, data: { fp: p } });
   // Only active (or still activating) counts as started; anything else after confirm is a rejection.
   if (!['active', 'confirmed', 'submitted'].includes(p.state)) throw new ApiError(422, planFailText('STP', p.reason));
@@ -116,6 +117,6 @@ export async function cancelStp(user: User, id: string, otp: string | null | und
   // Unlike purchase plans (POST /v2/mf_purchase_plans/cancel {id, code}), switch plans cancel by path.
   await fp.post(`/v2/mf_switch_plans/${o.id}/cancel`, {}, { label: 'STP: cancel' });
   // Same as SWP: the cancel response and an immediate GET can still say `active`, so wait for FP to flip it.
-  await poll(() => fp.get(`/v2/mf_switch_plans/${o.id}`, { quiet: true }), (x) => x.state !== 'active', { every: 1500, max: 15000 }).catch(() => {});
+  await poll(() => fp.get(`/v2/mf_switch_plans/${o.id}`, { quiet: true, as: MfSwitchPlan }), (x) => x.state !== 'active', { every: 1500, max: 15000 }).catch(() => {});
   return { stp: planView(await refreshPlan(o)) };
 }

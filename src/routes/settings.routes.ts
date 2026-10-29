@@ -15,6 +15,8 @@ r.post('/settings/devices/logout-others', requireAuth, c.logoutOthers);
 r.post('/settings/devices/:id/logout', requireAuth, validate(s.device), c.logoutDevice);
 r.get('/settings/deletion', requireAuth, c.deletionStatus);
 r.post('/settings/deletion', requireAuth, limits.money, validate(s.deletion), c.requestDeletion);
+// a nominee added after onboarding (the onboarding route is closed once the investor exists at FP)
+r.post('/profile/nominee', requireAuth, limits.money, validate(s.nominee), c.addNominee);
 
 r.get('/notifications', requireAuth, c.listNotifications);
 r.post('/notifications/read', requireAuth, validate(n.read), c.markRead);

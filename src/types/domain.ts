@@ -1,8 +1,10 @@
 // Domain types: users, orders, plans, consents. Type-only: Node strips this file to nothing at runtime.
+import type { StoredFp } from '../integrations/fp.schemas.ts';
 
 /**
- * JSON from FintechPrimitives and the other partner APIs. Its shape depends on the endpoint and changes without notice,
- * so it is deliberately loose; code reads it defensively (`?.`, `||`).
+ * JSON from a FintechPrimitives endpoint without a model (onboarding, reports, pre-verification) and from the other
+ * partner APIs: loose, read defensively (`?.`, `||`). Orders, plans, payments and mandates have models
+ * (integrations/fp.schemas.ts).
  */
  
 export type FpObject = Record<string, any>;
@@ -37,8 +39,8 @@ export interface FpIds {
 }
 
 export interface Mandate {
-  id: string | number; status?: string; type?: string; limit?: number; umrn?: string | null; valid_from?: string;
-  valid_to?: string; created_at?: string; bank_account_id?: number; auth_url?: string; [k: string]: unknown;
+  id: string | number; status?: string | null; type?: string | null; limit?: number | null; umrn?: string | null; valid_from?: string | null;
+  valid_to?: string | null; created_at?: string | null; bank_account_id?: number | null; auth_url?: string; [k: string]: unknown;
 }
 
 export interface Deletion {
@@ -100,6 +102,10 @@ export interface UserData {
   nominee?: Nominee | null;
   nominee_skipped?: boolean;
   nominee_consent?: TxnConsent;
+  /** When a nominee was added after onboarding (Profile > Nominee). */
+  nominee_added_at?: string;
+  /** A nominee whose related party exists at FP but isn't on the account yet (a retry reuses it). */
+  nominee_pending?: Nominee & { relp: string };
   esign_consent_at?: string;
   onboarded_at?: string;
   fp?: FpIds;
@@ -126,17 +132,26 @@ export interface User {
 
 /** A plan instalment as stored on the plan (routes/sip.ts refreshPlan). */
 export interface Instalment {
-  id: string; old_id?: number; state: string; amount?: number; scheduled_on?: string; traded_on?: string | null;
-  units?: number; nav?: number; folio?: string | null; failure_code?: string | null; [k: string]: unknown;
+  id: string; old_id?: number | null; state: string; amount?: number | null; scheduled_on?: string | null; traded_on?: string | null;
+  units?: number | null; nav?: number | null; folio?: string | null; failure_code?: string | null; [k: string]: unknown;
 }
 
 /** A pause (FP skip instruction) as stored on a plan (routes/sip.ts skipView). */
 export interface Skip { id: string; state: string; from: string; to: string; remaining: number; skipped: number }
 
+/** A purchase's checkout payment as kept on the order (FP payment id and its last status). */
+export interface PaymentRef { id: number; status?: string | null; reference?: string | null }
+
+/** A SIP's up-front first-instalment payment: a UPI checkout or a NACH debit on the mandate. */
+export interface FirstPayment {
+  /** None when FP refused the debit (`failed` then says why). */
+  id?: number; status?: string | null; method?: string; order_old_id?: number | null; failed?: string; [k: string]: unknown;
+}
+
 /** orders.data: the last FP object plus our own extras. */
 export interface OrderData {
-  fp?: FpObject;
-  payment?: FpObject;
+  fp?: StoredFp;
+  payment?: PaymentRef;
   token_url?: string;
   batch_payment?: string | number;
   amc_id?: number;
@@ -148,7 +163,7 @@ export interface OrderData {
   installments?: Instalment[];
   skips?: Skip[];
   start_skip?: { id: string; from: string; to: string };
-  first_payment?: FpObject;
+  first_payment?: FirstPayment;
   first_payment_failed?: boolean;
   replaced_by?: string;
   replaces?: string;

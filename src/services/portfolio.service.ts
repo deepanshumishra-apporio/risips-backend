@@ -2,6 +2,7 @@
 // imported from other platforms (external.service.ts).
 import { ordersRepo } from '../db/repositories/orders.repository.ts';
 import { fp } from '../integrations/fp.client.ts';
+import { HoldingsReport } from '../integrations/fp.schemas.ts';
 import { scheme, summary } from './catalog.service.ts';
 import { inProgress, openView, outOf, pendingItem } from './orders.service.ts';
 import { externalHoldings, summarise } from './externalHoldings.service.ts';
@@ -12,21 +13,21 @@ import type { FpObject, Order, User } from '../types/domain.ts';
 /** One Risips holding on the Portfolio screen (portfolio()). */
 export interface Holding {
   isin: string; folio: string; fund: FundSummary | { name: string; short_name: string };
-  units: number; nav: number; nav_date: string | undefined; current: number; invested: number; redeemable: number;
+  units: number; nav: number; nav_date: string | null | undefined; current: number; invested: number; redeemable: number;
   gain: number; gain_pct: number; avg_nav: number; xirr: number | null; day_change: number;
   /** A redemption / switch of all units is in progress: nothing more can leave until it's processed. */
   locked: boolean;
   /** Orders on their way out of / into this holding. */
   pending: ReturnType<typeof pendingItem>[];
-  sip: { id: string; amount: number; count: number; next: string | null; frequency: string | undefined } | null;
-  stp: { id: string; amount: number | null; next: string | undefined; to: string | null } | null;
-  swp: { id: string; amount: number | null; next: string | undefined; remaining: number | null } | null;
+  sip: { id: string; amount: number; count: number; next: string | null; frequency: string | null | undefined } | null;
+  stp: { id: string; amount: number | null; next: string | null | undefined; to: string | null } | null;
+  swp: { id: string; amount: number | null; next: string | null | undefined; remaining: number | null } | null;
 } // circular with sip.ts: only used inside functions, so safe in ESM
 
 /** Every folio the user's orders have landed in (FP reports are queried by folio on ONDC). */
 export const foliosFor = (all: Order[]): string[] => [...new Set(all.flatMap((o) => [
   o.data.fp?.folio_number, o.data.fp?.switch_in_folio_number, ...(o.data.installments || []).map((i) => i.folio),
-]).filter(Boolean))];
+]).filter((x): x is string => !!x))];
 
 export async function portfolio(user: User) {
   const ids = user.data.fp;
@@ -39,7 +40,7 @@ export async function portfolio(user: User) {
   if (!ids?.mfia) return empty;
   const folios = foliosFor(all);
   if (!folios.length) return empty;
-  const rep = await fp.get(`/api/oms/reports/holdings?folios=${folios.join(',')}`, { label: 'holdings report' });
+  const rep = await fp.get(`/api/oms/reports/holdings?folios=${folios.join(',')}`, { label: 'holdings report', as: HoldingsReport });
   const xirrByIsin: Record<string, FpObject> = {};
   let acctXirr: number | null = null;
   try {
@@ -62,8 +63,8 @@ export async function portfolio(user: User) {
   const aged = (isin?: string) => Date.now() - firstAt(isin) >= YEAR;
   if (!aged()) acctXirr = null;
   const holdings: Holding[] = [];
-  for (const f of rep.folios || []) {
-    for (const sc of f.schemes || []) {
+  for (const f of rep.folios ?? []) {
+    for (const sc of f.schemes ?? []) {
       const units = Number(sc.holdings?.units || 0);
       if (units <= 0) continue;
       const cur = Number(sc.market_value?.amount || 0);
@@ -86,7 +87,7 @@ export async function portfolio(user: User) {
       const locked = out.some((o) => o.amount == null);
       const redeemable = Number(sc.market_value?.redeemable_amount ?? cur);
       holdings.push({
-        isin: sc.isin, folio: f.folio_number, fund: summary(cat) || { name: sc.name, short_name: sc.name },
+        isin: sc.isin, folio: f.folio_number, fund: summary(cat) || { name: sc.name ?? sc.isin, short_name: sc.name ?? sc.isin },
         units, nav: Number(sc.nav?.value || 0), nav_date: sc.nav?.as_on, current: cur, invested: inv,
         redeemable: locked ? 0 : redeemable, gain: cur - inv,
         locked, pending: [...out.map((o) => pendingItem(o, 'out')), ...into.map((o) => pendingItem(o, 'in'))],

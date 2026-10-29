@@ -61,7 +61,7 @@ async function sipSummary(user: User) {
   await Promise.all(open.map((o) => refreshPlan(o).catch(() => {})));
   const sips = (await ordersRepo.forUser(user.id, 'sip')).map(planView).filter((p) => p.state === 'active' || p.state === 'awaiting_payment');
   const running = sips.filter((p) => p.state === 'active' && !p.pause);
-  const next = running.filter((p) => p.next_debit).sort((a, b) => a.next_debit.localeCompare(b.next_debit))[0] || null;
+  const next = running.filter((p): p is PlanView & { next_debit: string } => !!p.next_debit).sort((a, b) => a.next_debit.localeCompare(b.next_debit))[0] || null;
   return { sips, running, next, monthly: running.reduce((a, p) => a + Number(p.amount), 0) };
 }
 

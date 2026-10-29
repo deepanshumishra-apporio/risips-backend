@@ -22,7 +22,7 @@ export const adminSchemas = {
   investors: {
     query: z.object({
       q: optional(z.string().trim().toLowerCase().max(100)),
-      stage: optional(z.string().regex(/^[a-z_]{1,40}$/, 'Unknown stage.')),
+      stage: optional(z.string().regex(/^[a-z_-]{1,40}$/, 'Unknown stage.')),
       ...paging,
     }),
   },

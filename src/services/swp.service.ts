@@ -3,7 +3,8 @@
 // the target fund.
 import crypto from 'node:crypto';
 import { ordersRepo } from '../db/repositories/orders.repository.ts';
-import { fp } from '../integrations/fp.client.ts';
+import { asModel, fp } from '../integrations/fp.client.ts';
+import { HoldingsReport, listOf, MfRedemption, MfRedemptionPlan, SkipInstruction } from '../integrations/fp.schemas.ts';
 import { poll } from '../utils/async.ts';
 import { ApiError } from '../utils/errors.ts';
 import { istToday } from '../utils/format.ts';
@@ -12,7 +13,7 @@ import { requireTxnOtp, sendTxnOtp } from './otp.service.ts';
 import { consentFor, freeValue, ownOrder, planFailText, requireInvestor } from './orders.service.ts';
 import { STATUS } from './stp.service.ts';
 import type { Ctx } from './orders.service.ts';
-import type { FpObject, Order, User } from '../types/domain.ts';
+import type { Instalment, Order, User } from '../types/domain.ts';
 
 export const planView = (o: Order) => {
   const f = o.data.fp || {};
@@ -42,11 +43,11 @@ function firstWithdrawal(o: Order): string | null {
 }
 
 export async function refreshPlan(o: Order): Promise<Order> {
-  const f = await fp.get(`/v2/mf_redemption_plans/${o.id}`, { label: 'refresh SWP' });
+  const f = await fp.get(`/v2/mf_redemption_plans/${o.id}`, { label: 'refresh SWP', as: MfRedemptionPlan });
   let installments = o.data.installments || [];
   try {
-    const l = await fp.get(`/v2/mf_redemptions?plan=${o.id}`, { label: 'SWP installments' });
-    installments = (l.data || []).map((x: FpObject) => ({
+    const l = await fp.get(`/v2/mf_redemptions?plan=${o.id}`, { label: 'SWP installments', as: listOf(MfRedemption) });
+    installments = l.data.map((x): Instalment => ({
       id: x.id, old_id: x.old_id, state: x.state, amount: x.redeemed_amount ?? x.amount, scheduled_on: x.scheduled_on, traded_on: x.traded_on || null,
       units: x.redeemed_units ?? x.units, nav: x.redeemed_price ?? null, failure_code: x.failure_code,
     }));
@@ -97,8 +98,8 @@ export async function startSwp(ctx: Ctx, b: { isin: string; folio: string; amoun
     if (first < istToday(2)) throw new ApiError(400, 'The first withdrawal date is too close to start later. Pick another date or start this month.');
   }
   // As with STP, ONDC's review does not check holdings (₹5,000/mo on a ₹986 holding reached review_completed), so we do.
-  const rep = await fp.get(`/api/oms/reports/holdings?folios=${encodeURIComponent(folio)}`, { label: 'SWP: holding' });
-  const held = rep.folios?.flatMap((f: FpObject) => f.schemes || []).find((x: FpObject) => x.isin === s.isin);
+  const rep = await fp.get(`/api/oms/reports/holdings?folios=${encodeURIComponent(folio)}`, { label: 'SWP: holding', as: HoldingsReport });
+  const held = (rep.folios ?? []).flatMap((f) => f.schemes ?? []).find((x) => x.isin === s.isin);
   const value = await freeValue(ctx.user.id, folio, s.isin, Number(held?.market_value?.redeemable_amount ?? held?.market_value?.amount ?? 0));
   if (value < amount) throw new ApiError(400, `You hold ₹${Math.floor(value).toLocaleString('en-IN')} in this fund, less than one withdrawal.`);
   // OTP last, so a validation error above doesn't use up the code
@@ -110,9 +111,9 @@ export async function startSwp(ctx: Ctx, b: { isin: string; folio: string; amoun
     installment_day: day, number_of_installments: installments, systematic: true, auto_generate_installments: true,
     initiated_by: 'investor', initiated_via: 'mobile_app', user_ip: ctx.ip,
     source_ref_id: `risips-swp-${ctx.user.id}-${crypto.randomBytes(4).toString('hex')}`,
-  }, { label: 'SWP: create plan' });
+  }, { label: 'SWP: create plan', as: MfRedemptionPlan });
   await ordersRepo.upsert({ id: p.id, ...meta, state: p.state, data: { fp: p, twofa } });
-  p = await poll(() => fp.get(`/v2/mf_redemption_plans/${p.id}`, { quiet: true }), (x) => x.state !== 'created', { every: 2000, max: 45000 });
+  p = await poll(() => fp.get(`/v2/mf_redemption_plans/${p.id}`, { quiet: true, as: MfRedemptionPlan }), (x) => x.state !== 'created', { every: 2000, max: 45000 });
   if (p.state !== 'review_completed') {
     await ordersRepo.upsert({ id: p.id, ...meta, state: p.state, data: { fp: p } });
     throw new ApiError(422, p.state === 'created'
@@ -120,13 +121,19 @@ export async function startSwp(ctx: Ctx, b: { isin: string; folio: string; amoun
       : planFailText('SWP', p.reason));
   }
   // consent + confirmed in one call, as for SIP and STP plans (verified 2026-09-25: active within seconds)
-  p = await fp.patch('/v2/mf_redemption_plans', { id: p.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: 'SWP: consent + confirm' });
-  p = await poll(() => fp.get(`/v2/mf_redemption_plans/${p.id}`, { quiet: true }), (x) => !['confirmed', 'submitted'].includes(x.state), { every: 2000, max: 30000 });
+  p = await fp.patch('/v2/mf_redemption_plans', { id: p.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: 'SWP: consent + confirm', as: MfRedemptionPlan });
+  p = await poll(() => fp.get(`/v2/mf_redemption_plans/${p.id}`, { quiet: true, as: MfRedemptionPlan }), (x) => !['confirmed', 'submitted'].includes(x.state), { every: 2000, max: 30000 });
   let saved = await ordersRepo.upsert({ id: p.id, ...meta, state: p.state, data: { fp: p, until_stopped: untilStopped, start_offset: offset } });
   // Only active (or still activating) counts as started; anything else after confirm is a rejection.
   if (!['active', 'confirmed', 'submitted'].includes(p.state)) throw new ApiError(422, planFailText('SWP', p.reason));
   if (offset) {
     const first = p.start_date || p.next_installment_date;
+    // an active plan always has a start date; without one there is nothing to skip from, so don't guess
+    if (!first) {
+      await fp.post(`/v2/mf_redemption_plans/${p.id}/cancel`, {}, { label: 'SWP: cancel (no start date for a later start)' }).catch(() => {});
+      await ordersRepo.upsert({ ...saved, state: 'cancelled' });
+      throw new ApiError(422, 'The fund house did not give this SWP a start date, so a later start could not be set. Please try again.');
+    }
     const [y, m, d] = first.split('-').map(Number);
     const last = new Date(Date.UTC(y, m - 1 + offset - 1, d)).toISOString().slice(0, 10);
     const sk = await fp.raw('POST', `/v2/mf_redemption_plans/${p.id}/skip_instructions`, { from: first, to: last }, { label: 'SWP: later start (skip instruction)' });
@@ -136,7 +143,8 @@ export async function startSwp(ctx: Ctx, b: { isin: string; folio: string; amoun
       await ordersRepo.upsert({ ...saved, state: 'cancelled' });
       throw new ApiError(422, `The fund house did not accept a later start: ${sk.json?.error?.message || 'please pick the earliest month'}.`);
     }
-    saved = await ordersRepo.upsert({ ...saved, data: { skip: { id: sk.json.id, from: first, to: last } } });
+    const skip = asModel(SkipInstruction, sk.json, { label: 'SWP: later start (skip instruction)' });
+    saved = await ordersRepo.upsert({ ...saved, data: { skip: { id: skip.id, from: first, to: last } } });
   }
   return { swp: planView(saved) };
 }
@@ -161,6 +169,6 @@ export async function cancelSwp(user: User, id: string, otp: string | null | und
   await ordersRepo.upsert({ ...o, data: { cancel_twofa: await requireTxnOtp(user, 'swp_cancel', otp) } });
   // Cancels by path, like switch plans. The response and an immediate GET still say `active`; FP flips it ~1 s later.
   await fp.post(`/v2/mf_redemption_plans/${o.id}/cancel`, {}, { label: 'SWP: cancel' });
-  await poll(() => fp.get(`/v2/mf_redemption_plans/${o.id}`, { quiet: true }), (x) => x.state !== 'active', { every: 1500, max: 15000 }).catch(() => {});
+  await poll(() => fp.get(`/v2/mf_redemption_plans/${o.id}`, { quiet: true, as: MfRedemptionPlan }), (x) => x.state !== 'active', { every: 1500, max: 15000 }).catch(() => {});
   return { swp: planView(await refreshPlan(o)) };
 }

@@ -30,12 +30,19 @@ const EnvSchema = z.object({
   RISIPS_STATE_DIR: z.string().min(1).optional(),
   // How many reverse proxies sit in front (App Service, Caddy, ALB): req.ip is the client only when this is right.
   TRUST_PROXY: z.string().regex(/^(\d+|false)$/, 'a number of proxy hops, or "false"').optional(),
-  // Signs the short-lived selfie / signature URLs and hashes OTP codes. Required in production; the sandbox makes a
-  // random one per start (open OTPs and file links then stop working after a restart).
+  // Signs the short-lived selfie / signature URLs and hashes OTP codes. Required in production; without it the sandbox
+  // makes one and keeps it in <state>/app.secret.
   APP_SECRET: z.string().min(32).optional(),
   FP_WEBHOOK_TOKEN: z.string().min(24).optional(),
-  // Print login / transaction OTPs to the server log. Default: on in the sandbox, off in production.
+  // Print an OTP to the server log when no MSG91 channel delivers it (as the JS backend does, production included: until
+  // the MSG91 templates are set, the log is the only place a production code goes). LOG_OTPS=0 turns that off.
   LOG_OTPS: flag,
+  // MSG91 OTP delivery (integrations/msg91.ts). Each channel is on once its settings are present; until then codes go to the log.
+  MSG91_AUTHKEY: z.string().optional(),
+  MSG91_SMS_TEMPLATE_ID: z.string().optional(), // MSG91 template linked to the DLT-approved OTP text
+  MSG91_EMAIL_TEMPLATE_ID: z.string().optional(),
+  MSG91_EMAIL_DOMAIN: z.string().optional(), // the domain verified in MSG91 Email
+  MSG91_EMAIL_FROM: z.string().optional(), // e.g. no-reply@<that domain>
   SESSION_IDLE_DAYS: z.coerce.number().int().min(1).default(30),
   SESSION_MAX_DAYS: z.coerce.number().int().min(1).default(180),
   // Scales every rate limit (tests and load tests raise it; 1 = the production limits).
@@ -72,6 +79,22 @@ const need = (k: string): string => {
 
 const demoMode = !PROD && env.DEMO_MODE !== '0';
 
+/**
+ * Without APP_SECRET (sandbox, laptop): a random secret kept in <state>/app.secret, so open OTPs and image links survive
+ * a restart (the Azure sandbox sleeps when idle), as the JS backend's <state>/files.key did.
+ */
+function stateSecret() {
+  const file = path.join(STATE_DIR, 'app.secret');
+  try {
+    const s = fs.readFileSync(file, 'utf8').trim();
+    if (s.length >= 32) return s;
+  } catch { /* first start */ }
+  const s = crypto.randomBytes(32).toString('hex');
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.writeFileSync(file, s, { mode: 0o600 });
+  return s;
+}
+
 export const config = {
   port: env.PORT,
   // Public base URL the phone/emulator uses to reach this server (payment return pages).
@@ -80,10 +103,17 @@ export const config = {
   production: PROD,
   // Sandbox helpers: return OTPs in API responses so the demo can be driven without SMS/email.
   demoMode,
-  logOtps: env.LOG_OTPS ? env.LOG_OTPS === '1' : !PROD,
+  logOtps: env.LOG_OTPS !== '0',
+  msg91: {
+    authKey: env.MSG91_AUTHKEY || null,
+    smsTemplateId: env.MSG91_SMS_TEMPLATE_ID || null,
+    emailTemplateId: env.MSG91_EMAIL_TEMPLATE_ID || null,
+    emailDomain: env.MSG91_EMAIL_DOMAIN || null,
+    emailFrom: env.MSG91_EMAIL_FROM || null,
+  },
   trustProxy: env.TRUST_PROXY === undefined ? 1 : env.TRUST_PROXY === 'false' ? false : Number(env.TRUST_PROXY),
   databaseUrl: env.DATABASE_URL || null,
-  appSecret: env.APP_SECRET || crypto.randomBytes(32).toString('hex'),
+  appSecret: env.APP_SECRET || stateSecret(),
   webhookToken: env.FP_WEBHOOK_TOKEN || '',
   session: { idleDays: env.SESSION_IDLE_DAYS, maxDays: env.SESSION_MAX_DAYS },
   rateLimitScale: env.RATE_LIMIT_SCALE,

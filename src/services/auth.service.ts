@@ -16,7 +16,7 @@ export const hashPin = (userId: number, pin: string) => crypto.scryptSync(String
 export const pinMatches = (user: User, pin: string) => !!user.pin_hash && safeEqual(hashPin(user.id, pin), user.pin_hash);
 
 export async function startEmail(email: string) {
-  return { ok: true, expires_in: 120, existing: !!(await usersRepo.byEmail(email)), ...(await sendLoginOtp('email', email)) };
+  return { ok: true, expires_in: 120, existing: !!(await usersRepo.byEmail(email)), ...(await sendLoginOtp('email', email, { email })) };
 }
 
 export async function verifyEmail(email: string, code: string, device: DeviceInfo) {
@@ -40,7 +40,7 @@ export async function verifyEmail(email: string, code: string, device: DeviceInf
 export async function startMobile(user: User, mobile: string) {
   // The FP investor profile holds the verified number; changing it here would not reach FP.
   if (user.data.onboarded_at && mobile !== user.mobile) throw new ApiError(409, 'Your mobile number is already registered. Contact support to change it.');
-  return { ok: true, expires_in: 120, ...(await sendLoginOtp('mobile', `${user.id}:${mobile}`)) };
+  return { ok: true, expires_in: 120, ...(await sendLoginOtp('mobile', `${user.id}:${mobile}`, { mobile })) };
 }
 
 export async function verifyMobile(user: User, mobile: string, code: string, bankConsent: boolean) {

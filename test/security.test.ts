@@ -125,7 +125,7 @@ describe('selfie and signature files', () => {
     const up = await t.call('POST', '/onb/selfie', { image: pngDataUrl() }, token);
     assert.equal(up.status, 200);
     const url = (up.json!.user as Record<string, string>).selfie_url;
-    assert.match(url, /^\/files\/\d+_selfie_[a-f0-9]{8}\.png\?exp=\d+&sig=[a-f0-9]{64}$/);
+    assert.match(url, /^\/files\/\d+_selfie_[a-f0-9]{32}\.png\?exp=\d+&sig=[a-f0-9]{64}$/);
     assert.equal((await t.call('GET', url)).status, 200);
     assert.equal((await t.call('GET', url.split('?')[0])).status, 404, 'unsigned link');
     assert.equal((await t.call('GET', url.replace(/sig=./, 'sig=0'))).status, 404, 'tampered signature');

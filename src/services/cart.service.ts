@@ -7,7 +7,8 @@ import { config } from '../config/env.ts';
 import { checkoutsRepo } from '../db/repositories/misc.repository.ts';
 import { ordersRepo } from '../db/repositories/orders.repository.ts';
 import { usersRepo } from '../db/repositories/users.repository.ts';
-import { fp, FpError } from '../integrations/fp.client.ts';
+import { asModelOrNull, fp, FpError } from '../integrations/fp.client.ts';
+import { Payment } from '../integrations/fp.schemas.ts';
 import { ApiError } from '../utils/errors.ts';
 import { scheme, summary } from './catalog.service.ts';
 import { usableMandate } from './mandate.service.ts';
@@ -123,7 +124,7 @@ async function lineStatus(it: CheckoutItem) {
     if (o.state === 'successful') return { label: 'Order successful', tone: 'success', ref: v.ref };
     if (['failed', 'cancelled', 'reversed'].includes(o.state)) return { label: 'Order failed', tone: 'fail', detail: failText(v.failure_code), ref: v.ref };
     if (v.payment?.status === 'SUCCESS') return { label: 'Order placed', tone: 'success', ref: v.ref };
-    if (['FAILED', 'REJECTED'].includes(v.payment?.status)) return { label: 'Payment failed', tone: 'fail', ref: v.ref };
+    if (['FAILED', 'REJECTED'].includes(v.payment?.status ?? '')) return { label: 'Payment failed', tone: 'fail', ref: v.ref };
     return { label: 'Payment pending', tone: 'pending', ref: v.ref };
   }
   if (!['cancelled', 'completed', 'failed'].includes(o.state)) o = await refreshPlan(o).catch(() => o!);
@@ -135,11 +136,12 @@ async function lineStatus(it: CheckoutItem) {
     const pay = o.data.first_payment;
     if (pay?.id && pay.status !== 'SUCCESS') {
       const x = await fp.raw('GET', `/api/pg/payments/${pay.id}`, undefined, { quiet: true }).catch(() => null);
-      if (x?.status === 200) o = await ordersRepo.upsert({ ...o, data: { first_payment: { ...pay, status: x.json.status } } });
+      const p = x?.status === 200 ? asModelOrNull(Payment, x.json, { label: 'cart SIP first payment status' }) : null;
+      if (p) o = await ordersRepo.upsert({ ...o, data: { first_payment: { ...pay, status: p.status } } });
     }
     const st = o.data.first_payment?.status;
     if (st === 'SUCCESS') return { label: 'SIP active', tone: 'success', sip_id: p.id };
-    if (['FAILED', 'REJECTED'].includes(st)) return { label: 'Payment failed', tone: 'fail', sip_id: p.id };
+    if (['FAILED', 'REJECTED'].includes(st ?? '')) return { label: 'Payment failed', tone: 'fail', sip_id: p.id };
     return { label: 'Payment pending', tone: 'pending', sip_id: p.id };
   }
   return { label: p.status === 'Active' ? 'SIP active' : p.status, tone: p.state === 'active' ? 'success' : 'pending', sip_id: p.id };

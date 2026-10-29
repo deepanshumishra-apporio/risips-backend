@@ -23,7 +23,7 @@ r.post('/onb/profile', validate(s.profile), c.updateProfile);
 r.get('/onb/pincode/:pin', validate(s.pincode), c.pincode);
 r.post('/onb/address', validate(s.address), c.address);
 r.post('/onb/aadhaar/start', limits.otpSendUser, validate(s.aadhaarStart), c.aadhaarStart);
-r.post('/onb/aadhaar/verify', limits.otpVerify, validate(s.aadhaarVerify), c.aadhaarVerify);
+r.post('/onb/aadhaar/verify', limits.otpVerifyUser, validate(s.aadhaarVerify), c.aadhaarVerify);
 r.get('/onb/ifsc/:ifsc', validate(s.ifsc), c.ifsc);
 r.post('/onb/bank', limits.kycCheck, validate(s.bank), c.bank);
 r.post('/onb/selfie', imageJson, validate(s.image), c.selfie);

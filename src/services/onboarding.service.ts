@@ -2,12 +2,13 @@
 // On eSign the investor is created in FP: profile -> phone/email/address -> bank -> nominee -> MF account.
 import { usersRepo } from '../db/repositories/users.repository.ts';
 import { fp, orNull, pv } from '../integrations/fp.client.ts';
+import { MfInvestmentAccount, RelatedParty } from '../integrations/fp.schemas.ts';
 import { poll } from '../utils/async.ts';
 import { ApiError } from '../utils/errors.ts';
 import { ageOf } from '../utils/format.ts';
 import { log } from '../utils/logger.ts';
 import { saveImage } from './files.service.ts';
-import { checkLoginOtp, requireTxnOtp, sendLoginOtp } from './otp.service.ts';
+import { checkLoginOtp, requireTxnOtp, sendAadhaarOtp } from './otp.service.ts';
 import { nextStep, publicUser } from './user.service.ts';
 import type { BankDetails, FpObject, User, UserData } from '../types/domain.ts';
 
@@ -103,7 +104,7 @@ export async function saveAddress(user: User, { line1, line2, pincode, gender }:
 // stored.
 
 export async function startAadhaar(user: User, aadhaar: string) {
-  const sent = await sendLoginOtp('aadhaar', String(user.id), 300, 6); // UIDAI OTPs are 6 digits
+  const sent = await sendAadhaarOtp(user.id);
   await usersRepo.merge(user.id, { aadhaar_pending: aadhaar.slice(-4) });
   return { ok: true, masked: `XXXX XXXX ${aadhaar.slice(-4)}`, ...sent };
 }
@@ -182,6 +183,45 @@ export async function saveNominee(user: User, n: { skip: boolean; name: string; 
   const consent = await requireTxnOtp(user, 'nominee', n.otp);
   const { name, dob, relationship, pan } = n;
   return { user: publicUser(await usersRepo.merge(user.id, { nominee: { name, dob, relationship, pan }, nominee_skipped: false, nominee_consent: consent })) };
+}
+
+/**
+ * Profile > Nominee: adds a nominee after onboarding, for an investor who opted out then. FP keeps nominees on the
+ * investment account's folio_defaults, which it copies only into folios opened from now on: existing folios keep no
+ * nominee (FP has no API to change them; the investor updates those with the fund house or MF Central). The app says so.
+ * Changing an existing nominee is not offered: FP can't update a related party's proof once set.
+ */
+export async function addNomineeLater(user: User, n: { skip: boolean; name: string; dob: string; relationship: string; pan: string; otp?: string | null }) {
+  const ids = user.data.fp;
+  if (!user.data.onboarded_at || !ids?.invp || !ids.mfia) throw new ApiError(409, 'Please finish setting up your account first.');
+  if (user.data.nominee) throw new ApiError(409, 'You already have a nominee. Contact support to change it.');
+  if (n.skip) throw new ApiError(400, 'Enter your nominee’s details.');
+  if (n.name.toLowerCase() === (user.data.name || '').toLowerCase()) throw new ApiError(400, 'Nominee cannot be yourself.');
+  if (ageOf(n.dob)! < 18) throw new ApiError(400, 'Minor nominees need guardian details, which this demo does not collect. Please add an adult nominee.');
+  if (n.pan === user.data.pan) throw new ApiError(400, 'Nominee PAN must be different from yours.');
+  const consent = await requireTxnOtp(user, 'nominee', n.otp); // after validation, before the first FP write
+  const { name, dob, relationship, pan } = n;
+  // A retry after a failed account update reuses the related party already created for the same details.
+  const pending = user.data.nominee_pending;
+  const same = pending && pending.name === name && pending.dob === dob && pending.relationship === relationship && pending.pan === pan;
+  let relp = same ? pending.relp : null;
+  if (!relp) {
+    relp = (await fp.post('/v2/related_parties', { profile: ids.invp, name, relationship, date_of_birth: dob, pan }, { label: 'add nominee', as: RelatedParty })).id;
+    await usersRepo.merge(user.id, { nominee_pending: { name, dob, relationship, pan, relp } });
+  }
+  // PATCH folio_defaults with everything it already holds (contacts, payout bank), so nothing else is cleared
+  const acct = await fp.get(`/v2/mf_investment_accounts/${ids.mfia}`, { label: 'nominee: read account', as: MfInvestmentAccount });
+  const keep = Object.fromEntries(Object.entries(acct.folio_defaults || {}).filter(([k, v]) => v != null && !/^nominee|^nominations_/.test(k)));
+  await fp.patch('/v2/mf_investment_accounts', {
+    id: ids.mfia,
+    folio_defaults: { ...keep, nominee1: relp, nominee1_allocation_percentage: 100, nominee1_identity_proof_type: 'pan', nominations_info_visibility: 'show_all_nominee_names' },
+  }, { label: 'nominee: add to new folios', as: MfInvestmentAccount });
+  const u = await usersRepo.merge(user.id, {
+    nominee: { name, dob, relationship, pan }, nominee_skipped: false, nominee_consent: consent, nominee_added_at: consent.at,
+    fp: { ...ids, relp }, nominee_pending: undefined,
+  });
+  log.info('Nominee added after onboarding', { uid: user.id });
+  return { user: publicUser(u) };
 }
 
 // ---------- eSign: create the investor in FP ----------

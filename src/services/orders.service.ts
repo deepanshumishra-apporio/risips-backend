@@ -3,7 +3,9 @@
 import crypto from 'node:crypto';
 import { config } from '../config/env.ts';
 import { ordersRepo } from '../db/repositories/orders.repository.ts';
-import { fp, FpError } from '../integrations/fp.client.ts';
+import { asModelOrNull, fp, FpError } from '../integrations/fp.client.ts';
+import { CheckoutPayment, HoldingsReport, listOf, MfPurchase, MfRedemption, MfSwitch, Payment } from '../integrations/fp.schemas.ts';
+import type { FpModel, FpOrderObject } from '../integrations/fp.schemas.ts';
 import { poll, sleep } from '../utils/async.ts';
 import { ApiError } from '../utils/errors.ts';
 import { scheme, summary } from './catalog.service.ts';
@@ -15,6 +17,9 @@ export interface Ctx { user: User; ip: string }
 
 export const PATHS: Partial<Record<OrderKind, string>> & Record<'purchase' | 'redemption' | 'switch', string> = { purchase: '/v2/mf_purchases', redemption: '/v2/mf_redemptions', switch: '/v2/mf_switches' };
 export const TERMINAL = ['successful', 'failed', 'cancelled', 'reversed', 'completed'];
+
+/** The model of each one-time order kind's FP object. */
+const ORDER_MODELS: Record<'purchase' | 'redemption' | 'switch', FpModel<FpOrderObject>> = { purchase: MfPurchase, redemption: MfRedemption, switch: MfSwitch };
 
 export function requireInvestor(user: User) {
   const f = user.data.fp;
@@ -56,7 +61,7 @@ function purchaseStatus(o: Order) {
   const pay = o.data?.payment?.status;
   if (o.kind !== 'purchase' || !['pending', 'confirmed', 'submitted'].includes(o.state) || !o.data?.payment) return null;
   if (pay === 'SUCCESS') return null;
-  return ['FAILED', 'REJECTED'].includes(pay) ? 'Payment failed' : 'Payment pending';
+  return ['FAILED', 'REJECTED'].includes(pay ?? '') ? 'Payment failed' : 'Payment pending';
 }
 
 /** App-facing order view. */
@@ -71,7 +76,7 @@ export function view(o: Order) {
     ref: f.old_id ? `#MF${String(f.old_id).padStart(6, '0')}` : o.id,
     kind: o.kind,
     isin: o.isin,
-    fund: summary(s) || { name: f.scheme_name || o.isin, short_name: o.isin },
+    fund: summary(s) || { name: (typeof f.scheme_name === 'string' && f.scheme_name) || o.isin, short_name: o.isin },
     fund_to: s2 ? summary(s2) : null,
     amount: o.amount ?? f.redeemed_amount ?? f.switched_out_amount ?? null, // null until FP prices a full redemption/switch
     units,
@@ -100,8 +105,9 @@ export function view(o: Order) {
 }
 
 export async function refresh(o: Order): Promise<Order> {
-  if (!PATHS[o.kind]) return o;
-  const f = await fp.get(`${PATHS[o.kind]}/${o.id}`, { label: `refresh ${o.kind}` });
+  const m = ORDER_MODELS[o.kind as keyof typeof ORDER_MODELS];
+  if (!PATHS[o.kind] || !m) return o;
+  const f = await fp.get(`${PATHS[o.kind]}/${o.id}`, { label: `refresh ${o.kind}`, as: m });
   return await ordersRepo.upsert({ ...o, state: f.state, data: { fp: f } });
 }
 
@@ -109,8 +115,9 @@ export async function refresh(o: Order): Promise<Order> {
 export async function refreshPayment(o: Order): Promise<Order> {
   if (o.kind !== 'purchase' || !o.data.payment?.id || o.data.payment.status === 'SUCCESS') return o;
   const p = await fp.raw('GET', `/api/pg/payments/${o.data.payment.id}`, undefined, { quiet: true });
-  if (p.status !== 200) return o;
-  return await ordersRepo.upsert({ ...o, data: { payment: { id: o.data.payment.id, status: p.json.status, reference: p.json.payment_reference ?? null } } });
+  const pay = p.status === 200 ? asModelOrNull(Payment, p.json, { label: 'payment status' }) : null;
+  if (!pay) return o;
+  return await ordersRepo.upsert({ ...o, data: { payment: { id: o.data.payment.id, status: pay.status, reference: pay.payment_reference ?? null } } });
 }
 
 /** Folio already opened with this AMC (the AMC does not reuse folios automatically). */
@@ -124,8 +131,8 @@ export async function folioForAmc(userId: number, amcId: number): Promise<string
   return null;
 }
 
-async function waitReview(path: string, id: string): Promise<FpObject> {
-  return poll(() => fp.get(`${path}/${id}`, { quiet: true }), (x) => x.state !== 'under_review', { every: 2000, max: 45000 });
+async function waitReview<T extends { state: string }>(path: string, id: string, as: FpModel<T>): Promise<T> {
+  return poll(() => fp.get(`${path}/${id}`, { quiet: true, as }), (x) => x.state !== 'under_review', { every: 2000, max: 45000 });
 }
 
 // ---------- Lumpsum ----------
@@ -154,10 +161,10 @@ export async function placeLumpsum(ctx: Ctx, { isin, amount: rawAmount, twofa }:
     mf_investment_account: ids.mfia, scheme: s.isin, amount, user_ip: ip, server_ip: ip, gateway: 'ondc',
     source_ref_id: `risips-${ctx.user.id}-${crypto.randomBytes(5).toString('hex')}`,
     ...(folio ? { folio_number: folio } : {}),
-  }, { label: 'lumpsum: create order' });
+  }, { label: 'lumpsum: create order', as: MfPurchase });
   await ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind: 'purchase', isin: s.isin, amount, state: o.state, data: { fp: o, amc_id: s.amc_id, twofa } });
   // 2. wait for review -> pending
-  o = await waitReview(PATHS.purchase, o.id);
+  o = await waitReview(PATHS.purchase, o.id, MfPurchase);
   await ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind: 'purchase', isin: s.isin, amount, state: o.state, data: { fp: o } });
   if (o.state !== 'pending') throw new ApiError(422, `Order could not be placed. ${failText(o.failure_code, o.state === 'under_review' ? 'The fund house is taking longer than usual; check Orders in a minute.' : 'Please try again in a moment.')}`, { order: view((await ordersRepo.get(o.id))!) });
   // 3. consent alone (ONDC rejects consent + state together for purchases)
@@ -166,12 +173,12 @@ export async function placeLumpsum(ctx: Ctx, { isin, amount: rawAmount, twofa }:
   const pay = await fp.post('/api/pg/payments/netbanking', {
     amc_order_ids: [o.old_id], method: 'UPI', provider_name: 'ONDC', bank_account_id: ids.bank_old_id,
     payment_postback_url: `${config.publicUrl}/pay/return?order=${o.id}`,
-  }, { label: 'lumpsum: create payment' });
+  }, { label: 'lumpsum: create payment', as: CheckoutPayment });
   // 5. confirm -> submitted
-  o = await fp.patch('/v2/mf_purchases', { id: o.id, state: 'confirmed' }, { label: 'lumpsum: confirm order' });
+  o = await fp.patch('/v2/mf_purchases', { id: o.id, state: 'confirmed' }, { label: 'lumpsum: confirm order', as: MfPurchase });
   // During an ONDC outage FP fails the order ~1 s after confirm (order_processing_error). Catch that here so the
   // investor isn't sent to a checkout for a dead order; a healthy order is 'submitted' within ~2 s.
-  o = await poll(() => fp.get(`${PATHS.purchase}/${o.id}`, { quiet: true }), (x) => x.state !== 'confirmed', { every: 1500, max: 3000 });
+  o = await poll(() => fp.get(`${PATHS.purchase}/${o.id}`, { quiet: true, as: MfPurchase }), (x) => x.state !== 'confirmed', { every: 1500, max: 3000 });
   if (['failed', 'cancelled'].includes(o.state)) {
     await ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind: 'purchase', isin: s.isin, amount, state: o.state, data: { fp: o } });
     throw new ApiError(503, `Order could not be placed. ${failText(o.failure_code)} Nothing was debited.`, { order: view((await ordersRepo.get(o.id))!) });
@@ -212,11 +219,11 @@ export async function placeLumpsumBatch(ctx: Ctx, lines: { isin: string; amount:
       source_ref_id: `risips-${ctx.user.id}-${crypto.randomBytes(5).toString('hex')}`,
       ...(folio ? { folio_number: folio } : {}),
     })),
-  }, { label: 'cart: create batch orders' });
-  let os: FpObject[] = created.data;
-  const save = (o: FpObject, i: number, data: OrderData = {}) => ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind: 'purchase', isin: vs[i].s.isin, amount: vs[i].amount, state: o.state, data: { fp: o, amc_id: vs[i].s.amc_id, ...data } });
+  }, { label: 'cart: create batch orders', as: listOf(MfPurchase) });
+  let os: MfPurchase[] = created.data;
+  const save = (o: MfPurchase, i: number, data: OrderData = {}) => ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind: 'purchase', isin: vs[i].s.isin, amount: vs[i].amount, state: o.state, data: { fp: o, amc_id: vs[i].s.amc_id, ...data } });
   await Promise.all(os.map((o, i) => save(o, i)));
-  os = await Promise.all(os.map((o) => waitReview(PATHS.purchase, o.id)));
+  os = await Promise.all(os.map((o) => waitReview(PATHS.purchase, o.id, MfPurchase)));
   await Promise.all(os.map((o, i) => save(o, i)));
   const bad = os.find((o) => o.state !== 'pending');
   if (bad) throw new ApiError(422, `These orders could not be placed. ${failText(bad.failure_code, bad.state === 'under_review' ? 'The fund house is taking longer than usual; please try again in a few minutes.' : 'Please try again in a moment.')}`);
@@ -224,10 +231,10 @@ export async function placeLumpsumBatch(ctx: Ctx, lines: { isin: string; amount:
   const pay = await fp.post('/api/pg/payments/netbanking', {
     amc_order_ids: os.map((o) => o.old_id), method: 'UPI', provider_name: 'ONDC', bank_account_id: ids.bank_old_id,
     payment_postback_url: `${config.publicUrl}/pay/return?order=${os[0].id}`,
-  }, { label: 'cart: batch payment' });
+  }, { label: 'cart: batch payment', as: CheckoutPayment });
   await fp.patch('/v2/mf_purchases/batch', { mf_purchases: os.map((o) => ({ id: o.id, state: 'confirmed' })) }, { label: 'cart: batch confirm' });
   // as for a single order: an outage fails the batch ~1 s after confirm; don't open a checkout for dead orders
-  os = await Promise.all(os.map((o) => poll(() => fp.get(`${PATHS.purchase}/${o.id}`, { quiet: true }), (x) => x.state !== 'confirmed', { every: 1500, max: 3000 })));
+  os = await Promise.all(os.map((o) => poll(() => fp.get(`${PATHS.purchase}/${o.id}`, { quiet: true, as: MfPurchase }), (x) => x.state !== 'confirmed', { every: 1500, max: 3000 })));
   const failed = os.find((o) => ['failed', 'cancelled'].includes(o.state));
   await Promise.all(os.map((o, i) => save(o, i, failed ? {} : { token_url: pay.token_url, payment: { id: pay.id, status: pay.status || 'PENDING' }, batch_payment: pay.id })));
   if (failed) throw new ApiError(503, `These orders could not be placed. ${failText(failed.failure_code)} Nothing was debited.`);
@@ -238,10 +245,11 @@ export async function placeLumpsumBatch(ctx: Ctx, lines: { isin: string; amount:
 
 async function placeSellSide(ctx: Ctx, kind: 'redemption' | 'switch', body: FpObject, meta: { isin: string; isin_to?: string; amount: number | null }, otp: string | null | undefined) {
   const path = PATHS[kind];
+  const as: FpModel<MfRedemption | MfSwitch> = kind === 'redemption' ? MfRedemption : MfSwitch;
   const twofa = await requireTxnOtp(ctx.user, kind === 'redemption' ? 'redeem' : 'switch', otp); // after validation, before the first FP write
-  let o = await fp.post(path, body, { label: `${kind}: create order` });
+  let o = await fp.post(path, body, { label: `${kind}: create order`, as });
   await ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind, ...meta, state: o.state, data: { fp: o, twofa } });
-  o = await waitReview(path, o.id);
+  o = await waitReview(path, o.id, as);
   if (o.state !== 'pending') {
     await ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind, ...meta, state: o.state, data: { fp: o } });
     throw new ApiError(422, o.state === 'under_review'
@@ -249,7 +257,7 @@ async function placeSellSide(ctx: Ctx, kind: 'redemption' | 'switch', body: FpOb
       : `The order could not be placed. ${failText(o.failure_code)}`);
   }
   // consent + confirmed in ONE call for redemptions/switches
-  o = await fp.patch(path, { id: o.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: `${kind}: consent + confirm` });
+  o = await fp.patch(path, { id: o.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: `${kind}: consent + confirm`, as });
   return await ordersRepo.upsert({ id: o.id, user_id: ctx.user.id, kind, ...meta, state: o.state, data: { fp: o } });
 }
 
@@ -259,9 +267,9 @@ async function placeSellSide(ctx: Ctx, kind: 'redemption' | 'switch', body: FpOb
  * open, ₹297.91 redeemable). market = true gives the full value (units held x latest NAV) instead.
  */
 async function redeemableValue(folio: string, isin: string, market = false): Promise<number | null> {
-  const rep = await fp.get(`/api/oms/reports/holdings?folios=${encodeURIComponent(folio)}`, { label: 'redeemable amount' }).catch(() => null);
+  const rep = await fp.get(`/api/oms/reports/holdings?folios=${encodeURIComponent(folio)}`, { label: 'redeemable amount', as: HoldingsReport }).catch(() => null);
   if (!rep) return null;
-  const held = (rep.folios || []).flatMap((f: FpObject) => f.schemes || []).find((x: FpObject) => x.isin === isin);
+  const held = (rep.folios ?? []).flatMap((f) => f.schemes ?? []).find((x) => x.isin === isin);
   return held ? Number((market ? null : held.market_value?.redeemable_amount) ?? held.market_value?.amount ?? 0) : 0;
 }
 

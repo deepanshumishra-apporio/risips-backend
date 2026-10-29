@@ -14,5 +14,6 @@ data/pg.lock
 .env.*
 !.env.example
 secrets/
+app.secret
 *.pem
 *.key

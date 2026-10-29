@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { valid } from '../middleware/validate.ts';
 import { notificationsSchemas as n, settingsSchemas as s } from '../validation/settings.validation.ts';
 import * as settings from '../services/settings.service.ts';
+import { addNomineeLater } from '../services/onboarding.service.ts';
 import * as notifications from '../services/notifications.service.ts';
 
 export const getNotifyPrefs = async (req: Request, res: Response) => { res.json({ prefs: settings.notifyPrefs(req.user) }); };
@@ -22,6 +23,8 @@ export async function requestDeletion(req: Request, res: Response) {
   const { reason, otp } = valid(req, s.deletion).body;
   res.json(await settings.requestDeletion(req.user, reason, otp));
 }
+
+export const addNominee = async (req: Request, res: Response) => { res.json(await addNomineeLater(req.user, valid(req, s.nominee).body)); };
 
 export const listNotifications = async (req: Request, res: Response) => { res.json(await notifications.listNotifications(req.user, req.token)); };
 export const markRead = async (req: Request, res: Response) => { res.json(await notifications.markRead(req.user, req.token, valid(req, n.read).body.ids)); };

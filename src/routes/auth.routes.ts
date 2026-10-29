@@ -10,7 +10,7 @@ const r = Router();
 r.post('/auth/email/start', limits.otpSendIp, limits.otpSendEmail, validate(s.emailStart), c.emailStart);
 r.post('/auth/email/verify', limits.otpVerify, validate(s.emailVerify), c.emailVerify);
 r.post('/auth/mobile/start', requireAuth, limits.otpSendUser, validate(s.mobileStart), c.mobileStart);
-r.post('/auth/mobile/verify', requireAuth, limits.otpVerify, validate(s.mobileVerify), c.mobileVerify);
+r.post('/auth/mobile/verify', requireAuth, limits.otpVerifyUser, validate(s.mobileVerify), c.mobileVerify);
 r.post('/auth/pin/set', requireAuth, limits.pin, validate(s.pinSet), c.pinSet);
 r.post('/auth/pin/verify', requireAuth, limits.pin, validate(s.pinVerify), c.pinVerify);
 r.post('/auth/biometric', requireAuth, validate(s.biometric), c.biometric);

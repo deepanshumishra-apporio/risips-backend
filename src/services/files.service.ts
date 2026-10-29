@@ -8,7 +8,8 @@ import { hmacHex, randomHex, safeEqual } from '../utils/crypto.ts';
 
 fs.mkdirSync(paths.uploads, { recursive: true });
 
-export const FILE_NAME_RE = /^\d+_(selfie|signature)_[a-f0-9]{8}\.(png|jpg)$/;
+// 32 hex since 2026-10-26 (the JS backend's fae8d25); files saved before that have 8, and must keep loading.
+export const FILE_NAME_RE = /^\d+_(selfie|signature)_(?:[a-f0-9]{32}|[a-f0-9]{8})\.(png|jpg)$/;
 const MAX_BYTES = 8 * 1024 * 1024;
 const LINK_HOURS = 2;
 
@@ -22,7 +23,7 @@ export function saveImage(userId: number, kind: 'selfie' | 'signature', dataUrl:
   const png = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
   const jpg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
   if (m[1] === 'png' ? !png : !jpg) throw new ApiError(400, 'Invalid image.');
-  const name = `${userId}_${kind}_${randomHex(4)}.${m[1] === 'png' ? 'png' : 'jpg'}`;
+  const name = `${userId}_${kind}_${randomHex(16)}.${m[1] === 'png' ? 'png' : 'jpg'}`;
   fs.writeFileSync(path.join(paths.uploads, name), buf);
   return name;
 }

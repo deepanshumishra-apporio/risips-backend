@@ -11,7 +11,7 @@ export const istToday = (days = 0) => new Date(Date.now() + 5.5 * 3600e3 + days 
 const parseDay = (s: string) => { const [y, m, d] = String(s).slice(0, 10).split('-').map(Number); return new Date(y, m - 1, d); };
 
 /** The monthly instalment date `n` months after `from` (a yyyy-mm-dd instalment date), on the plan's day. */
-export function addMonths(from: string, n: number, day?: number): string {
+export function addMonths(from: string, n: number, day?: number | null): string {
   const d = parseDay(from);
   return isoDay(new Date(d.getFullYear(), d.getMonth() + n, day || d.getDate()));
 }

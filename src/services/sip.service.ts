@@ -3,7 +3,8 @@
 import crypto from 'node:crypto';
 import { config } from '../config/env.ts';
 import { ordersRepo } from '../db/repositories/orders.repository.ts';
-import { fp } from '../integrations/fp.client.ts';
+import { asModel, asModelOrNull, fp } from '../integrations/fp.client.ts';
+import { CheckoutPayment, listOf, MfPurchase, MfPurchasePlan, NachPayment, Payment, SkipInstruction } from '../integrations/fp.schemas.ts';
 import { poll } from '../utils/async.ts';
 import { ApiError } from '../utils/errors.ts';
 import { addMonths, istToday } from '../utils/format.ts';
@@ -13,7 +14,7 @@ import { requireTxnOtp } from './otp.service.ts';
 import { consentFor, folioForAmc, ownOrder, planFailText, requireInvestor } from './orders.service.ts';
 import type { Ctx } from './orders.service.ts';
 import type { PlanRule, Scheme } from '../types/catalog.ts';
-import type { FpObject, Instalment, Mandate, Order, OrderData, Skip, User } from '../types/domain.ts';
+import type { FirstPayment, Instalment, Mandate, Order, OrderData, Skip, User } from '../types/domain.ts';
 
 /** What createPlan() registers: a validateSip() result plus how to start it. */
 interface PlanInput {
@@ -42,7 +43,7 @@ const STATUS: Record<string, string> = {
 const OPEN_SKIP = ['PENDING', 'ACTIVE'];
 // A modified SIP's start skip (see /modify) keeps the new plan off months the old one would not have debited; it isn't a pause.
 const openSkips = (o: Order) => (o.data.skips || []).filter((s) => OPEN_SKIP.includes(s.state) && s.id !== o.data.start_skip?.id);
-const skipView = (s: FpObject): Skip => ({ id: s.id, state: s.state, from: s.from_date, to: s.to_date, remaining: Number(s.remaining_installments ?? 0), skipped: Number(s.skipped_installments ?? 0) });
+const skipView = (s: SkipInstruction): Skip => ({ id: s.id, state: s.state ?? '', from: s.from_date ?? '', to: s.to_date ?? '', remaining: Number(s.remaining_installments ?? 0), skipped: Number(s.skipped_installments ?? 0) });
 
 /** The live pause, if any: first/last skipped instalment and the date debits restart. */
 function pauseOf(o: Order) {
@@ -101,16 +102,17 @@ export const planView = (o: Order) => {
 };
 
 export async function refreshPlan(o: Order): Promise<Order> {
-  const f = await fp.get(`/v2/mf_purchase_plans/${o.id}`, { label: 'refresh SIP plan' });
+  const f = await fp.get(`/v2/mf_purchase_plans/${o.id}`, { label: 'refresh SIP plan', as: MfPurchasePlan });
   let installments = o.data.installments || [];
   try {
-    const l = await fp.get(`/v2/mf_purchases?plan=${o.id}`, { label: 'SIP installments' });
-    installments = (l.data || []).map((x: FpObject) => ({ id: x.id, old_id: x.old_id, state: x.state, amount: x.amount, scheduled_on: x.scheduled_on, traded_on: x.traded_on || null, units: x.allotted_units, nav: x.purchased_price, folio: x.folio_number, failure_code: x.failure_code }));
+    const l = await fp.get(`/v2/mf_purchases?plan=${o.id}`, { label: 'SIP installments', as: listOf(MfPurchase) });
+    installments = l.data.map((x): Instalment => ({ id: x.id, old_id: x.old_id, state: x.state, amount: x.amount, scheduled_on: x.scheduled_on, traded_on: x.traded_on || null, units: x.allotted_units, nav: x.purchased_price, folio: x.folio_number, failure_code: x.failure_code }));
   } catch {}
   let skips = o.data.skips || [];
   if (['active', 'confirmed'].includes(f.state) || openSkips(o).length) {
     const s = await fp.raw('GET', `/v2/mf_purchase_plans/${o.id}/skip_instructions`, undefined, { quiet: true });
-    if (s.status === 200) skips = (s.json.data || []).map(skipView);
+    const list = s.status === 200 ? asModelOrNull(listOf(SkipInstruction), s.json, { label: 'SIP skip instructions' }) : null;
+    if (list) skips = list.data.map(skipView);
   }
   let saved = await ordersRepo.upsert({ ...o, state: f.state, data: { fp: f, installments, skips } });
   // On production the paid first instalment is allotted a working day later: track the payment itself so the app
@@ -118,7 +120,8 @@ export async function refreshPlan(o: Order): Promise<Order> {
   const pay = saved.data.first_payment;
   if (pay?.id && pay.status !== 'SUCCESS' && !['successful', 'failed'].includes(upfrontInstallment(saved)?.state ?? '')) {
     const x = await fp.raw('GET', `/api/pg/payments/${pay.id}`, undefined, { quiet: true }).catch(() => null);
-    if (x?.status === 200) saved = await ordersRepo.upsert({ ...saved, data: { first_payment: { ...pay, status: x.json.status } } });
+    const p = x?.status === 200 ? asModelOrNull(Payment, x.json, { label: 'SIP first payment status' }) : null;
+    if (p) saved = await ordersRepo.upsert({ ...saved, data: { first_payment: { ...pay, status: p.status } } });
   }
   // FP keeps the plan active when the up-front first payment fails, and would start debiting the mandate on the
   // next SIP date. The investor never started this SIP, so cancel it (retried on each refresh until FP accepts).
@@ -126,7 +129,7 @@ export async function refreshPlan(o: Order): Promise<Order> {
     saved = await ordersRepo.upsert({ ...saved, data: { first_payment_failed: true } });
     if (!['cancelled', 'completed', 'failed'].includes(f.state)) {
       try {
-        const c = await fp.post('/v2/mf_purchase_plans/cancel', { id: o.id, cancellation_code: 'amount_not_available' }, { label: 'SIP: cancel (first payment failed)' });
+        const c = await fp.post('/v2/mf_purchase_plans/cancel', { id: o.id, cancellation_code: 'amount_not_available' }, { label: 'SIP: cancel (first payment failed)', as: MfPurchasePlan });
         saved = await ordersRepo.upsert({ ...saved, state: c.state, data: { fp: c } });
       } catch {}
     }
@@ -179,18 +182,18 @@ export async function createPlan(ctx: Ctx, { s, rule, amount, day, mandate, firs
     initiated_by: 'investor', initiated_via: 'mobile_app', user_ip: ctx.ip,
     source_ref_id: `risips-sip-${ctx.user.id}-${crypto.randomBytes(4).toString('hex')}`,
     ...(folio ? { folio_number: folio } : {}),
-  }, { label: 'SIP: create plan' });
+  }, { label: 'SIP: create plan', as: MfPurchasePlan });
   const meta = { id: p.id, user_id: ctx.user.id, kind: 'sip' as const, isin: s.isin, amount };
   await ordersRepo.upsert({ ...meta, state: p.state, data: { fp: p, ...data } });
-  p = await poll(() => fp.get(`/v2/mf_purchase_plans/${p.id}`, { quiet: true }), (x) => !['created', 'under_review'].includes(x.state), { every: 2000, max: 45000 });
+  p = await poll(() => fp.get(`/v2/mf_purchase_plans/${p.id}`, { quiet: true, as: MfPurchasePlan }), (x) => !['created', 'under_review'].includes(x.state), { every: 2000, max: 45000 });
   if (p.state !== 'review_completed') {
     await ordersRepo.upsert({ ...meta, state: p.state, data: { fp: p } });
     throw new ApiError(422, ['created', 'under_review'].includes(p.state)
       ? 'The fund house is taking longer than usual to review this SIP. Please check your SIPs in a few minutes.'
       : planFailText('SIP', p.reason));
   }
-  p = await fp.patch('/v2/mf_purchase_plans', { id: p.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: 'SIP: consent + confirm' });
-  p = await poll(() => fp.get(`/v2/mf_purchase_plans/${p.id}`, { quiet: true }), (x) => x.state !== 'confirmed', { every: 2000, max: 30000 });
+  p = await fp.patch('/v2/mf_purchase_plans', { id: p.id, state: 'confirmed', consent: consentFor(ctx.user) }, { label: 'SIP: consent + confirm', as: MfPurchasePlan });
+  p = await poll(() => fp.get(`/v2/mf_purchase_plans/${p.id}`, { quiet: true, as: MfPurchasePlan }), (x) => x.state !== 'confirmed', { every: 2000, max: 30000 });
   let saved = await ordersRepo.upsert({ ...meta, state: p.state, data: { fp: p } });
   if (!['active', 'confirmed'].includes(p.state)) throw new ApiError(422, planFailText('SIP', p.reason));
   saved = await refreshPlan(saved).catch(() => saved);
@@ -199,17 +202,19 @@ export async function createPlan(ctx: Ctx, { s, rule, amount, day, mandate, firs
   // send first_pay=upi keep the NACH debit on the mandate (runs in hourly batches).
   const first = saved.data.installments?.[0];
   if (first && firstNow) {
-    await poll(() => fp.get(`/v2/mf_purchases/${first.id}`, { quiet: true }), (x) => x.state !== 'under_review', { every: 2000, max: 30000 });
+    await poll(() => fp.get(`/v2/mf_purchases/${first.id}`, { quiet: true, as: MfPurchase }), (x) => x.state !== 'under_review', { every: 2000, max: 30000 });
     if (firstPay === 'upi') {
       const pay = await fp.post('/api/pg/payments/netbanking', {
         amc_order_ids: [first.old_id], method: 'UPI', provider_name: 'ONDC', bank_account_id: ids.bank_old_id,
         payment_postback_url: `${config.publicUrl}/pay/return?sip=${p.id}`,
       }, { label: 'SIP: first installment payment (UPI checkout)' });
       saved = await ordersRepo.upsert({ ...saved, data: { first_payment: { id: pay.id, method: 'UPI', order_old_id: first.old_id } } });
-      return { saved, token_url: pay.token_url };
+      return { saved, token_url: asModel(CheckoutPayment, pay, { label: 'SIP: first installment payment (UPI checkout)' }).token_url };
     }
     const pay = await fp.raw('POST', '/api/pg/payments/nach', { mandate_id: mandate.id, amc_order_ids: [first.old_id] }, { label: 'SIP: first installment debit' });
-    saved = await ordersRepo.upsert({ ...saved, data: { first_payment: pay.json } });
+    // a refused debit has no id: keep FP's reason, so the sweep and the app see a first payment that went nowhere
+    const debit = pay.status < 300 ? asModelOrNull(NachPayment, pay.json, { label: 'SIP: first installment debit' }) ?? (pay.json as FirstPayment) : null;
+    saved = await ordersRepo.upsert({ ...saved, data: { first_payment: debit ?? { failed: String(pay.json?.error?.message || `HTTP ${pay.status}`) } } });
   }
   return { saved };
 }
@@ -238,11 +243,11 @@ export async function createPlanBatch(ctx: Ctx, vs: ValidSip[], { mandate, data 
         ...(folio ? { folio_number: folio } : {}),
       };
     }),
-  }, { label: 'cart: create batch SIPs' });
-  let ps: FpObject[] = created.data;
-  const save = (p: FpObject, i: number, extra: OrderData = {}) => ordersRepo.upsert({ id: p.id, user_id: ctx.user.id, kind: 'sip', isin: vs[i].s.isin, amount: vs[i].amount, state: p.state, data: { fp: p, ...data, ...extra } });
+  }, { label: 'cart: create batch SIPs', as: listOf(MfPurchasePlan) });
+  let ps: MfPurchasePlan[] = created.data;
+  const save = (p: MfPurchasePlan, i: number, extra: OrderData = {}) => ordersRepo.upsert({ id: p.id, user_id: ctx.user.id, kind: 'sip', isin: vs[i].s.isin, amount: vs[i].amount, state: p.state, data: { fp: p, ...data, ...extra } });
   await Promise.all(ps.map((p, i) => save(p, i)));
-  const get = (p: FpObject) => fp.get(`/v2/mf_purchase_plans/${p.id}`, { quiet: true });
+  const get = (p: MfPurchasePlan) => fp.get(`/v2/mf_purchase_plans/${p.id}`, { quiet: true, as: MfPurchasePlan });
   ps = await Promise.all(ps.map((p) => poll(() => get(p), (x) => !['created', 'under_review'].includes(x.state), { every: 2000, max: 45000 })));
   await Promise.all(ps.map((p, i) => save(p, i)));
   const bad = ps.find((p) => p.state !== 'review_completed');
@@ -265,13 +270,13 @@ export async function createPlanBatch(ctx: Ctx, vs: ValidSip[], { mandate, data 
   saved = await Promise.all(saved.map((o) => refreshPlan(o).catch(() => o)));
   const firsts = saved.map((o) => o.data.installments?.[0]);
   if (firsts.some((x) => !x)) { await abandon(); throw new ApiError(502, 'The fund platform did not create the first instalments, so these SIPs were not started. Please try again in a few minutes.'); }
-  await Promise.all(firsts.map((x) => poll(() => fp.get(`/v2/mf_purchases/${x!.id}`, { quiet: true }), (y) => y.state !== 'under_review', { every: 2000, max: 30000 })));
+  await Promise.all(firsts.map((x) => poll(() => fp.get(`/v2/mf_purchases/${x!.id}`, { quiet: true, as: MfPurchase }), (y) => y.state !== 'under_review', { every: 2000, max: 30000 })));
   const pay = await fp.post('/api/pg/payments/netbanking', {
     amc_order_ids: firsts.map((x) => x!.old_id), method: 'UPI', provider_name: 'ONDC', bank_account_id: ids.bank_old_id,
     payment_postback_url: `${config.publicUrl}/pay/return?sip=${saved[0].id}`,
   }, { label: 'cart: batch SIP first installments payment (UPI checkout)' });
   saved = await Promise.all(saved.map((o, i) => ordersRepo.upsert({ ...o, data: { first_payment: { id: pay.id, method: 'UPI', order_old_id: firsts[i]!.old_id }, batch_payment: pay.id } })));
-  return { saved, token_url: pay.token_url };
+  return { saved, token_url: asModel(CheckoutPayment, pay, { label: 'cart: batch SIP first installments payment (UPI checkout)' }).token_url };
 }
 
 
@@ -305,7 +310,7 @@ export const CANCEL_CODES = ['amount_not_available', 'investment_returns_not_as_
 
 async function cancelPlan(o: Order, code: string | undefined) {
   // FP: POST /v2/mf_purchase_plans/cancel {id, cancellation_code}; codes are a fixed, case-sensitive list.
-  const c = await fp.post('/v2/mf_purchase_plans/cancel', { id: o.id, cancellation_code: code && CANCEL_CODES.includes(code) ? code : 'invest_later' }, { label: 'SIP: cancel' });
+  const c = await fp.post('/v2/mf_purchase_plans/cancel', { id: o.id, cancellation_code: code && CANCEL_CODES.includes(code) ? code : 'invest_later' }, { label: 'SIP: cancel', as: MfPurchasePlan });
   // Use the cancel response: an immediate re-read can still return the old state.
   return await ordersRepo.upsert({ ...o, state: c.state, data: { fp: c } });
 }
@@ -345,7 +350,8 @@ export async function pauseSip(user: User, id: string, months: number, otp: stri
     }
     throw new ApiError(422, e?.message || 'The fund platform did not accept the pause. Please try again.');
   }
-  o = await ordersRepo.upsert({ ...o, data: { skips: [...(o.data.skips || []).filter((x) => x.id !== r1.json.id), skipView(r1.json)], paused_at: new Date().toISOString(), pause_twofa: twofa } });
+  const skip = asModel(SkipInstruction, r1.json, { label: 'SIP: pause (skip instruction)' });
+  o = await ordersRepo.upsert({ ...o, data: { skips: [...(o.data.skips || []).filter((x) => x.id !== skip.id), skipView(skip)], paused_at: new Date().toISOString(), pause_twofa: twofa } });
   return { sip: planView(o) };
 }
 
@@ -401,7 +407,8 @@ export async function modifySip(ctx: Ctx, id: string, b: { amount: number; day: 
       await cancelPlan(saved, 'invest_later').catch(() => {});
       throw new ApiError(422, `We couldn't move this SIP to the new date without an extra debit (${sk.json?.error?.message || 'the fund house refused'}). Your current SIP is unchanged; try another date.`);
     }
-    fresh = await ordersRepo.upsert({ ...saved, data: { start_skip: { id: sk.json.id, from, to }, skips: [skipView(sk.json)] } });
+    const skip = asModel(SkipInstruction, sk.json, { label: 'SIP modify: start skip' });
+    fresh = await ordersRepo.upsert({ ...saved, data: { start_skip: { id: skip.id, from, to }, skips: [skipView(skip)] } });
   }
   // The new plan is live, so stop the old one. If FP refuses, say so: both plans would otherwise debit.
   try {

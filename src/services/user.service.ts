@@ -52,6 +52,7 @@ export function publicUser(u: User) {
     bank: d.bank ? { ...d.bank, account_masked: maskTail(d.bank.account_number, 4), account_number: undefined } : null,
     nominee: d.nominee || null,
     nominee_skipped: !!d.nominee_skipped,
+    nominee_added_at: d.nominee_added_at || null,
     kyc_compliant: kycCompliant(d),
     selfie_url: signedFileUrl(d.selfie),
     signature_url: signedFileUrl(d.signature),
