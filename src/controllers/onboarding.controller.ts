@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { valid } from '../middleware/validate.ts';
 import { onboardingSchemas as s } from '../validation/onboarding.validation.ts';
+import * as kyc from '../services/kyc.service.ts';
 import * as onb from '../services/onboarding.service.ts';
 import { clientIp } from '../utils/request.ts';
 
@@ -12,6 +13,10 @@ export const pincode = async (req: Request, res: Response) => { res.json(await o
 export const address = async (req: Request, res: Response) => { res.json(await onb.saveAddress(req.user, valid(req, s.address).body)); };
 export const aadhaarStart = async (req: Request, res: Response) => { res.json(await onb.startAadhaar(req.user, valid(req, s.aadhaarStart).body.aadhaar)); };
 export const aadhaarVerify = async (req: Request, res: Response) => { res.json(await onb.verifyAadhaar(req.user, valid(req, s.aadhaarVerify).body.code)); };
+export const kycStart = async (req: Request, res: Response) => { res.json(await kyc.startKyc(req.user, valid(req, s.kycStart).body)); };
+export const kycRefresh = async (req: Request, res: Response) => { res.json(await kyc.refreshKyc(req.user)); };
+export const kycEsign = async (req: Request, res: Response) => { res.json(await kyc.kycEsign(req.user)); };
+export const kycStatus = async (req: Request, res: Response) => { res.json(await kyc.kycStatus(req.user)); };
 export const ifsc = async (req: Request, res: Response) => { res.json(await onb.ifscLookup(valid(req, s.ifsc).params.ifsc)); };
 export const bank = async (req: Request, res: Response) => { res.json(await onb.verifyBank(req.user, valid(req, s.bank).body)); };
 export const selfie = async (req: Request, res: Response) => { res.json(await onb.saveSelfie(req.user, valid(req, s.image).body.image)); };

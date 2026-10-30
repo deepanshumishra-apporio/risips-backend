@@ -64,6 +64,10 @@ export const usersRepo = {
   importingIds: async () => (await orm.select({ id: users.id }).from(users)
     .where(sql`${users.data}->'ext'->>'status' = 'importing'`)).map((x) => x.id),
 
+  /** Users whose fresh KYC is with the KRA and not yet approved (kyc.service.ts sweepPendingKyc). */
+  pendingKycIds: async () => (await orm.select({ id: users.id }).from(users)
+    .where(sql`${users.data}->'kyc_form'->>'status' = 'submitted' AND ${users.data}->>'kyc_approved_at' IS NULL`)).map((x) => x.id),
+
   /** Every user, newest first (Admin API). */
   all: (): Promise<User[]> => orm.select().from(users).orderBy(desc(users.id)),
 };

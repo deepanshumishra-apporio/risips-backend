@@ -123,6 +123,13 @@ async function build(user: User) {
   if (u.onboarded_at && !u.nominee && !u.nominee_skipped) {
     out.push({ id: 'nominee-missing', tag: 'ACTION NEEDED', title: 'Add a nominee', body: 'SEBI requires nomination (or an opt-out) on your folios.', at: u.onboarded_at, route: '/profile/account' });
   }
+  // fresh KYC (kyc.service.ts): submitted to the KRA, then approved (the kyc-approvals job sets kyc_approved_at)
+  if (u.kyc_fresh && u.kyc_approved_at) {
+    out.push({ id: 'kyc-approved', tag: 'KYC', title: 'Your KYC is approved', body: 'The KRA has approved your KYC. You can start investing now.', at: u.kyc_approved_at, route: '/explore' });
+  } else if (u.kyc_fresh && u.kyc_form?.status === 'submitted') {
+    const at = u.kyc_form.submitted_at && Date.parse(u.kyc_form.submitted_at) ? new Date(u.kyc_form.submitted_at).toISOString() : u.onboarded_at || new Date(now).toISOString();
+    out.push({ id: 'kyc-with-kra', tag: 'KYC', title: 'Your KYC is with the KRA', body: 'It usually takes 1–3 working days. We’ll let you know as soon as you can invest.', at, route: '/profile/account' });
+  }
 
   const read = new Set((await usersRepo.byId(user.id))!.data.notif_read || []);
   return out

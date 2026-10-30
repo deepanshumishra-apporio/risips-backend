@@ -13,6 +13,54 @@ const { authSchemas } = await import('../src/validation/auth.validation.ts');
 const { ordersSchemas } = await import('../src/validation/orders.validation.ts');
 const { errorHandler } = await import('../src/middleware/errorHandler.ts');
 const { FpError } = await import('../src/integrations/fp.client.ts');
+const { nextStep, kycStatus } = await import('../src/services/user.service.ts');
+
+describe('onboarding steps', () => {
+  const base = {
+    mobile_verified: true, pin_set: true, pan_verified: true, pan_confirmed: true, occupation: 'business', income_slab: 'upto_1lakh',
+    marital_status: 'single', father_name: 'A Person', gender: 'male', address: { line1: 'x', pincode: '110001' },
+  };
+  const bank = { bank: { account_number: '1', ifsc: 'HDFC0000001', verified: true } };
+
+  it('a KYC-compliant PAN skips Aadhaar, selfie, signature and the KYC e-sign', () => {
+    const d = { ...base, ...bank, pan_checks: { readiness: { status: 'verified' } } };
+    assert.equal(nextStep(d), 'signature-consent');
+    assert.equal(nextStep({ ...d, fatca_declared: true }), 'nominee');
+    assert.equal(kycStatus(d), 'compliant');
+  });
+
+  it('a fresh KYC goes DigiLocker -> bank -> signature -> KYC e-sign, with no selfie', () => {
+    const d = { ...base, kyc_fresh: true, pan_checks: { readiness: { status: 'failed', code: 'kyc_unavailable' } } };
+    assert.equal(nextStep(d), 'aadhaar');
+    assert.equal(nextStep({ ...d, aadhaar_verified: true }), 'bank');
+    const signed = { ...d, ...bank, aadhaar_verified: true, fatca_declared: true, signature: 'x.png', kyc_form: { id: 'kycf_1', status: 'awaiting_esign' } };
+    assert.equal(nextStep({ ...signed, signature: undefined }), 'signature-consent');
+    assert.equal(nextStep(signed), 'kyc-esign');
+    assert.equal(kycStatus(signed), 'in_progress');
+    const submitted = { ...signed, kyc_form: { id: 'kycf_1', status: 'submitted' } };
+    assert.equal(nextStep(submitted), 'nominee');
+    assert.equal(kycStatus(submitted), 'with_kra');
+  });
+
+  it('a failed KYC form sends the investor back to DigiLocker', () => {
+    const d = { ...base, ...bank, kyc_fresh: true, fatca_declared: true, signature: 'x.png', aadhaar_verified: false, kyc_form: { id: 'kycf_1', status: 'failed' } };
+    assert.equal(nextStep(d), 'aadhaar');
+    assert.equal(kycStatus(d), 'failed');
+  });
+
+  it('an app that does not ask for fresh KYC keeps the old PAN stop', () => {
+    const p = onboardingSchemas.pan.body;
+    assert.equal(p.parse({ pan: 'ABCPX3753K', name: 'A Person', dob: '1990-01-01' }).fresh_kyc, false);
+    assert.equal(p.parse({ pan: 'ABCPX3753K', name: 'A Person', dob: '1990-01-01', fresh_kyc: true }).fresh_kyc, true);
+  });
+
+  it('accepts a location in India only', () => {
+    const s = onboardingSchemas.kycStart.body;
+    assert.ok(s.safeParse({ latitude: 28.61, longitude: 77.2 }).success);
+    assert.ok(!s.safeParse({ latitude: 51.5, longitude: -0.12 }).success);
+    assert.ok(!s.safeParse({}).success);
+  });
+});
 
 describe('redact', () => {
   it('masks PAN, bank, phone, email and secrets, deep inside objects', () => {
@@ -32,7 +80,7 @@ describe('redact', () => {
 describe('validation schemas', () => {
   it('accepts an individual PAN and normalises it', () => {
     const r = onboardingSchemas.pan.body.parse({ pan: ' abcpx1234k ', name: 'Ravi  Kumar', dob: '1990-04-12' });
-    assert.deepEqual(r, { pan: 'ABCPX1234K', name: 'Ravi Kumar', dob: '1990-04-12' });
+    assert.deepEqual(r, { pan: 'ABCPX1234K', name: 'Ravi Kumar', dob: '1990-04-12', fresh_kyc: false });
   });
   it('rejects a company PAN, an impossible date, a bad name', () => {
     assert.equal(onboardingSchemas.pan.body.safeParse({ pan: 'ABCCX1234K', name: 'Ravi Kumar', dob: '1990-04-12' }).success, false);

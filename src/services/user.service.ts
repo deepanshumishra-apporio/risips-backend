@@ -5,10 +5,23 @@ import type { User, UserData } from '../types/domain.ts';
 
 /**
  * KYC-compliant = FP pre-verification found a valid KYC record for the PAN at the KRA. Such an investor needs no fresh
- * KYC, so the Aadhaar, selfie and signature steps (the documents for a new KYC) are skipped. The PAN step turns away
- * every other readiness result for now, since fresh KYC isn't offered yet.
+ * KYC, so the Aadhaar and signature steps (the documents for a new KYC) are skipped. A PAN with no KRA record goes on
+ * with a fresh KYC (`kyc_fresh`, kyc.service.ts); the PAN step turns away every other readiness result.
  */
 export const kycCompliant = (d: UserData) => d.pan_checks?.readiness?.status === 'verified';
+
+/**
+ * For the app: `compliant` (can invest), `in_progress` (fresh KYC being filled in), `with_kra` (submitted, waiting for
+ * the KRA, usually 1-3 working days), `failed` (the form failed or expired: redo it), or null before the PAN step.
+ */
+export function kycStatus(d: UserData): string | null {
+  if (kycCompliant(d)) return 'compliant';
+  if (!d.kyc_fresh) return null;
+  const s = d.kyc_form?.status;
+  if (s === 'submitted') return 'with_kra';
+  if (s === 'failed' || s === 'expired') return 'failed';
+  return 'in_progress';
+}
 
 export function nextStep(d: UserData): string {
   if (d.onboarded_at) return 'home'; // onboarded users never go back into the flow, even if a later rule is added
@@ -22,10 +35,13 @@ export function nextStep(d: UserData): string {
   if (!d.father_name) return 'father';
   if (!d.address || !d.gender) return 'address'; // the address screen also collects gender (FP profile needs it)
   const kyc = kycCompliant(d);
-  if (!kyc && !d.aadhaar_verified) return 'aadhaar';
+  if (!kyc && !d.aadhaar_verified) return 'aadhaar'; // fresh KYC: DigiLocker
   if (!d.bank?.verified) return 'bank';
-  if (!kyc && !d.selfie) return 'selfie-intro';
+  // No selfie for a fresh KYC: the DigiLocker Aadhaar OTP is the liveness check (Cybrilla KYC Forms)
+  if (!kyc && !d.kyc_fresh && !d.selfie) return 'selfie-intro';
   if (!d.fatca_declared || (!kyc && !d.signature)) return 'signature-consent'; // FATCA/CRS is needed either way
+  // the investor e-signs the KYC form, which Cybrilla then submits to the KRA
+  if (!kyc && d.kyc_fresh && !['awaiting_submission', 'submitted'].includes(d.kyc_form?.status || '')) return 'kyc-esign';
   if (!d.nominee_consent) return 'nominee'; // a nomination or an opt-out, confirmed with an OTP
   if (!d.onboarded_at) return 'esign';
   return 'home';
@@ -54,6 +70,8 @@ export function publicUser(u: User) {
     nominee_skipped: !!d.nominee_skipped,
     nominee_added_at: d.nominee_added_at || null,
     kyc_compliant: kycCompliant(d),
+    kyc_fresh: !!d.kyc_fresh,
+    kyc_status: kycStatus(d),
     selfie_url: signedFileUrl(d.selfie),
     signature_url: signedFileUrl(d.signature),
     biometric: !!d.biometric,

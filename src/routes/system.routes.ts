@@ -9,7 +9,7 @@ import * as c from '../controllers/system.controller.ts';
 
 const r = Router();
 r.get('/health', c.health);
-r.all(['/pay/return', '/mandate/return'], htmlPage, express.urlencoded({ extended: false, limit: '20kb' }), c.returnPage);
+r.all(['/pay/return', '/mandate/return', '/kyc/return'], htmlPage, express.urlencoded({ extended: false, limit: '20kb' }), c.returnPage);
 // A missing or bad signature answers like a missing file (404), so links can't be probed.
 r.get('/files/:name', (req, res, next) => (req.query.sig ? next() : res.status(404).end()), validate(s.file), c.file);
 r.get('/debug/trace', requireAuth, validate(s.trace), c.debugTrace);

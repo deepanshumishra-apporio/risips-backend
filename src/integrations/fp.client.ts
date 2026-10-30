@@ -195,4 +195,26 @@ export const fp = {
 export const pv = {
   get: <T = FpJson>(p: string, o?: TypedOptions<T>) => must<T>('pv', 'GET', p, undefined, o),
   post: <T = FpJson>(p: string, b: unknown, o?: TypedOptions<T>) => must<T>('pv', 'POST', p, b, o),
+  patch: <T = FpJson>(p: string, b: unknown, o?: TypedOptions<T>) => must<T>('pv', 'PATCH', p, b, o),
+  upload: (p: string, file: { bytes: Buffer; name: string; type: string }, o?: CallOptions) => uploadPv(p, file, o),
 };
+
+/** A multipart file upload to the pre-verification API (KYC form signature). The trace shows the file name only. */
+async function uploadPv(p: string, file: { bytes: Buffer; name: string; type: string }, { label }: CallOptions = {}): Promise<FpJson> {
+  const url = config.pv.base + p;
+  const t0 = Date.now();
+  let r: Response;
+  for (let attempt = 0; ; attempt++) {
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(file.bytes)], { type: file.type }), file.name);
+    r = await send(url, { method: 'POST', headers: { Authorization: 'Bearer ' + (await getToken('pv')) }, body: form }, { label, t0 });
+    if (r.status === 401 && attempt === 0) { delete tokens.pv; continue; }
+    break;
+  }
+  const txt = await r.text();
+  let json: FpJson;
+  try { json = JSON.parse(txt); } catch { json = txt; }
+  record({ at: new Date().toISOString(), label, method: 'POST', url, body: { file: file.name }, status: r.status, ms: Date.now() - t0, response: json });
+  if (r.status >= 300) throw new FpError(`POST ${p} failed (HTTP ${r.status})`, r.status, json);
+  return json;
+}

@@ -1,16 +1,16 @@
 // KYC onboarding. PAN/name/DOB/KRA-readiness and bank are verified with FP pre-verification.
 // On eSign the investor is created in FP: profile -> phone/email/address -> bank -> nominee -> MF account.
 import { usersRepo } from '../db/repositories/users.repository.ts';
-import { fp, orNull, pv } from '../integrations/fp.client.ts';
+import { fp, orNull } from '../integrations/fp.client.ts';
 import { MfInvestmentAccount, RelatedParty } from '../integrations/fp.schemas.ts';
-import { poll } from '../utils/async.ts';
 import { ApiError } from '../utils/errors.ts';
 import { ageOf } from '../utils/format.ts';
 import { log } from '../utils/logger.ts';
 import { saveImage } from './files.service.ts';
+import { runPreVerification, uploadKycSignature } from './kyc.service.ts';
 import { checkLoginOtp, requireTxnOtp, sendAadhaarOtp } from './otp.service.ts';
 import { nextStep, publicUser } from './user.service.ts';
-import type { BankDetails, FpObject, User, UserData } from '../types/domain.ts';
+import type { BankDetails, User, UserData } from '../types/domain.ts';
 
 const READINESS_MSG: Record<string, string> = {
   kyc_unavailable: 'No KYC record found for this PAN with the KRA. A fresh KYC is needed.',
@@ -28,20 +28,9 @@ export function assertStillOnboarding(user: User) {
   if (user.data.onboarded_at) throw new ApiError(409, 'Your account is already set up. Contact support to change these details.');
 }
 
-async function runPreVerification(body: FpObject, { maxMs = 25000 } = {}): Promise<FpObject> {
-  const created = await pv.post('/poa/pre_verifications', body, { label: 'pre-verification' });
-  const done = await poll(
-    () => pv.get(`/poa/pre_verifications/${created.id}`, { quiet: true }),
-    (o) => o.status === 'completed' || o.status === 'failed',
-    { every: 1500, max: maxMs },
-  );
-  // record the final state in the trace
-  return pv.get(`/poa/pre_verifications/${created.id}`, { label: 'pre-verification result' }).catch(() => done);
-}
-
 // ---------- PAN ----------
 
-export async function verifyPan(user: User, { pan, name, dob }: { pan: string; name: string; dob: string }) {
+export async function verifyPan(user: User, { pan, name, dob, fresh_kyc = false }: { pan: string; name: string; dob: string; fresh_kyc?: boolean }) {
   if (user.data.pan_confirmed) throw new ApiError(409, 'Your PAN is already confirmed and can not be edited.');
   if (ageOf(dob)! < 18) throw new ApiError(400, 'You must be 18 or older to open an account. Investing for a minor is not supported yet.');
   const o = await runPreVerification({
@@ -52,7 +41,10 @@ export async function verifyPan(user: User, { pan, name, dob }: { pan: string; n
   });
   const checks = { readiness: o.readiness, pan: o.pan, name: o.name, date_of_birth: o.date_of_birth };
   const failed = Object.entries(checks).filter(([, v]) => v?.status !== 'verified');
-  if (o.status !== 'completed' || failed.length) {
+  // No KYC at the KRA but PAN, name and DOB check out: the investor goes on with a fresh KYC (kyc.service.ts).
+  // Other readiness failures (on hold, rejected, legacy, ...) need the KRA record fixed, which this app can't do.
+  const fresh = fresh_kyc && o.status === 'completed' && failed.length === 1 && failed[0][0] === 'readiness' && o.readiness?.code === 'kyc_unavailable';
+  if (o.status !== 'completed' || (failed.length && !fresh)) {
     const [k, v] = failed[0] || ['readiness', {}];
     let msg = 'We could not verify your PAN right now. Please try again.';
     if (v?.code === 'upstream_error') msg = READINESS_MSG.upstream_error; // retryable on any check, never "invalid"
@@ -64,8 +56,10 @@ export async function verifyPan(user: User, { pan, name, dob }: { pan: string; n
     await usersRepo.merge(user.id, { pan_attempt: { pan, pv_id: o.id, checks } });
     throw new ApiError(422, msg, { checks, pv_id: o.id });
   }
-  const u = await usersRepo.merge(user.id, { pan, name, dob, pan_verified: true, pan_pv_id: o.id, pan_checks: checks, pan_confirmed: false });
-  return { user: publicUser(u), checks, pv_id: o.id };
+  // A different PAN drops the KYC form started for the previous one.
+  const keepForm = user.data.pan === pan ? {} : { kyc_form: undefined, aadhaar_verified: false };
+  const u = await usersRepo.merge(user.id, { pan, name, dob, pan_verified: true, pan_pv_id: o.id, pan_checks: checks, pan_confirmed: false, kyc_fresh: fresh, ...keepForm });
+  return { user: publicUser(u), checks, pv_id: o.id, kyc_fresh: fresh };
 }
 
 export async function confirmPan(user: User) {
@@ -100,10 +94,12 @@ export async function saveAddress(user: User, { line1, line2, pincode, gender }:
 }
 
 // ---------- Aadhaar (demo) ----------
-// FP's KYC/Aadhaar products are not enabled on this tenant, so the OTP is simulated here. Only the last 4 digits are
-// stored.
+// The OTP is simulated here. Only the last 4 digits are stored. A fresh KYC fetches Aadhaar from DigiLocker instead
+// (kyc.service.ts startKyc), and only KYC-compliant or fresh-KYC investors get past the PAN step, so this is unused
+// outside old sandbox accounts.
 
 export async function startAadhaar(user: User, aadhaar: string) {
+  if (user.data.kyc_fresh) throw new ApiError(409, 'Verify your Aadhaar with DigiLocker.', { next_step: 'aadhaar' });
   const sent = await sendAadhaarOtp(user.id);
   await usersRepo.merge(user.id, { aadhaar_pending: aadhaar.slice(-4) });
   return { ok: true, masked: `XXXX XXXX ${aadhaar.slice(-4)}`, ...sent };
@@ -163,7 +159,8 @@ export async function saveSelfie(user: User, image: string) {
 
 export async function saveSignature(user: User, image: string) {
   const file = saveImage(user.id, 'signature', image);
-  return { user: publicUser(await usersRepo.merge(user.id, { signature: file, signature_at: new Date().toISOString() })) };
+  const u = await usersRepo.merge(user.id, { signature: file, signature_at: new Date().toISOString() });
+  return { user: publicUser(await uploadKycSignature(u)) }; // a fresh KYC also sends it to the KYC form
 }
 
 export async function saveDeclarations(user: User, runningAccount: boolean) {
@@ -229,7 +226,7 @@ export async function addNomineeLater(user: User, n: { skip: boolean; name: stri
 const ESIGN_GATE: Record<string, string> = {
   mobile: 'mobile number', pin: 'PIN', pan: 'PAN', 'pan-confirm': 'PAN', occupation: 'occupation', income: 'annual income',
   marital: 'marital status', father: "father's / spouse's name", address: 'address and gender', aadhaar: 'Aadhaar',
-  bank: 'bank account', 'selfie-intro': 'selfie', 'signature-consent': 'signature', nominee: 'nominee',
+  bank: 'bank account', 'selfie-intro': 'selfie', 'signature-consent': 'signature', 'kyc-esign': 'KYC e-sign', nominee: 'nominee',
 };
 
 /** Idempotent: resumes from any step that already succeeded (each FP id is saved as soon as it exists). */

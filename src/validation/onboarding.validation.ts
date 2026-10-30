@@ -28,6 +28,8 @@ export const onboardingSchemas = {
       pan: text('Enter a valid individual PAN (e.g. ABCPX1234K).').trim().toUpperCase().regex(INDIVIDUAL_PAN, 'Enter a valid individual PAN (e.g. ABCPX1234K).'),
       name: text('Enter your full name as on PAN (letters only).').transform(collapse).refine((n) => /^[A-Za-z][A-Za-z .']{2,69}$/.test(n), 'Enter your full name as on PAN (letters only).'),
       dob: realDate('Enter a valid date of birth (DD/MM/YYYY).'),
+      // Sent by app versions that have the fresh-KYC screens; older ones keep the "fresh KYC needed" stop.
+      fresh_kyc: z.boolean().optional().default(false),
     }),
   },
   profile: {
@@ -56,6 +58,13 @@ export const onboardingSchemas = {
     }),
   },
   aadhaarVerify: { body: z.object({ code: otpCode }) },
+  // The KYC form must be filled from within India (Cybrilla): the phone's location, roughly India's bounding box.
+  kycStart: {
+    body: z.object({
+      latitude: z.number({ error: 'Allow location access to continue.' }).min(6, 'Your KYC must be done from within India.').max(37.5, 'Your KYC must be done from within India.'),
+      longitude: z.number({ error: 'Allow location access to continue.' }).min(68, 'Your KYC must be done from within India.').max(97.5, 'Your KYC must be done from within India.'),
+    }),
+  },
   ifsc: { params: z.object({ ifsc }), paramsStatus: 400 },
   bank: {
     body: z.object({

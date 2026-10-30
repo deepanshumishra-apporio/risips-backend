@@ -96,11 +96,16 @@ and turned into `{ error, ...extra }` by `middleware/errorHandler.ts`.
 
 - **Validation:** every input goes through a zod schema; unknown fields are dropped. A bad body or query is a 400 with
   `{ error, reason: 'validation', fields }`; a malformed id in the path is a 404.
-- **Rate limits** (`middleware/rateLimit.ts`): 300 req/min per IP overall; sign-in codes 5 per email and 10 per IP
-  per 15 min; code checks 20 per IP; PIN tries 10 per user; KYC checks 10 per user per hour; orders and plans 30 per
-  user per 10 min. The counters are in memory: with more than one instance, add a shared store (Redis).
+- **Rate limits** (`middleware/rateLimit.ts`): 300 req/min per IP overall; sign-in codes 20 per email and 20 per IP
+  per hour; code checks 60 per IP per hour; PIN tries 10 per user per 15 min; KYC checks 30 per user per hour; orders
+  and plans 30 per user per 10 min. The counters are in memory: with more than one instance, add a shared store (Redis).
+- **OTP limits** (`services/otp.service.ts`, per purpose + email / mobile / user): one new code per 30 s and 20 per
+  hour; 10 wrong codes in an hour (20 in a day), counted across codes, block that sign-in or confirmation until the
+  oldest one ages out. While blocked, checking a code **and asking for a new one** both return `429 { reason:
+  'rate_limited', retry_after: <seconds> }`, so no unusable code is sent. The middleware limits above also
+  answer `429 { reason: 'rate_limited' }`, with the wait in the `RateLimit` header instead of `retry_after`.
 - **Sessions:** random 24-byte tokens, stored only as SHA-256 hashes; end after 30 days unused or 180 days in total.
-- **OTPs:** stored as HMACs, 5 wrong tries lock a code; returned to the app only in demo mode; printed to the log only
+- **OTPs:** stored as HMACs, 5 wrong tries lock a code (`400 { reason: 'locked' }`: ask for a new one); returned to the app only in demo mode; printed to the log only
   when `LOG_OTPS` allows (off in production).
 - **PIN:** scrypt, constant-time comparison, 5 wrong tries end the session.
 - **Files:** selfies and signatures are served only through signed links that expire within 2 hours; uploads must

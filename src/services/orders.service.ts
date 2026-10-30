@@ -10,6 +10,7 @@ import { poll, sleep } from '../utils/async.ts';
 import { ApiError } from '../utils/errors.ts';
 import { scheme, summary } from './catalog.service.ts';
 import { requireTxnOtp } from './otp.service.ts';
+import { kycCompliant, kycStatus } from './user.service.ts';
 import type { FpObject, Order, OrderData, OrderKind, TxnConsent, User } from '../types/domain.ts';
 
 /** Who is acting: the signed-in investor and their IP (FP records it with every order). */
@@ -24,6 +25,10 @@ const ORDER_MODELS: Record<'purchase' | 'redemption' | 'switch', FpModel<FpOrder
 export function requireInvestor(user: User) {
   const f = user.data.fp;
   if (!user.data.onboarded_at || !f?.mfia) throw new ApiError(403, 'Please complete your KYC to invest.');
+  // A fresh KYC: ONDC rejects orders (pan_kyc_incomplete) until the KRA shows the PAN as compliant
+  if (user.data.kyc_fresh && !kycCompliant(user.data)) {
+    throw new ApiError(403, 'Your KYC is with the KRA for approval (usually 1–3 working days). You can invest once it is approved.', { kyc_status: kycStatus(user.data) });
+  }
   return f;
 }
 

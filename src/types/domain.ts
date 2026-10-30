@@ -32,6 +32,21 @@ export interface BankDetails {
 
 export interface Nominee { name: string; dob: string; relationship: string; pan: string }
 
+/** A fresh-KYC application at Cybrilla POA (kyc.service.ts), as last read. */
+export interface KycFormState {
+  id: string;
+  /** under_review, created, awaiting_esign, awaiting_submission, submitted, failed, expired */
+  status: string;
+  reason?: string | null;
+  /** DigiLocker Aadhaar fetch: pending, fetched, failed */
+  proof_status?: string | null;
+  fields_needed?: string[] | null;
+  signature_provided?: boolean;
+  esign_status?: string | null;
+  expires_at?: string | null;
+  submitted_at?: string | null;
+}
+
 /** FP identifiers created at eSign (onboarding.ts). */
 export interface FpIds {
   invp?: string; phone?: string; email?: string; addr?: string; bank?: string; bank_old_id?: number;
@@ -81,6 +96,13 @@ export interface UserData {
   pan_pv_id?: string;
   pan_checks?: PanChecks;
   pan_attempt?: { pan: string; pv_id: string; checks: PanChecks };
+  /** The KRA has no KYC for this PAN, so the investor does a fresh KYC (kyc.service.ts). */
+  kyc_fresh?: boolean;
+  kyc_form?: KycFormState;
+  /** Last time the KRA status was checked after the form was submitted. */
+  kyc_checked_at?: string;
+  /** When the KRA showed the fresh KYC as compliant. */
+  kyc_approved_at?: string;
   occupation?: string;
   income_slab?: string;
   marital_status?: string;

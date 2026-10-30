@@ -71,8 +71,13 @@ setInterval(() => {
 const inWords = (s: number) => (s < 90 ? `${s} seconds` : s < 90 * 60 ? `${Math.ceil(s / 60)} minutes` : `${Math.ceil(s / 3600)} hours`);
 const tooMany = (msg: string, s: number) => new ApiError(429, `${msg} Please try again in ${inWords(s)}.`, { reason: 'rate_limited', retry_after: s });
 
-/** Call before issuing a code: spaces out new codes for one purpose + target. */
+/**
+ * Call before issuing a code: spaces out new codes for one purpose + target, and sends none while too many wrong codes
+ * block checking (checkOtp would refuse it, so the investor would get a code they can't use).
+ */
 function limitOtpIssue(purpose: string, target: string) {
+  const blocked = waitFor(`otp-wrong:${purpose}:${target}`, OTP_WRONG);
+  if (blocked) throw tooMany('Too many wrong codes.', blocked);
   const key = `otp-issue:${purpose}:${target}`;
   const s = waitFor(key, OTP_ISSUE);
   if (s) throw tooMany('A code was sent just now.', s);

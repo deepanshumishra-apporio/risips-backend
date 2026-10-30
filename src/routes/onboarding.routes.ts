@@ -16,6 +16,11 @@ r.use('/onb', (req: Request, _res: Response, next: NextFunction) => {
   if (req.method === 'POST' && req.path !== '/esign') assertStillOnboarding(req.user);
   next();
 });
+// Fresh KYC (no KRA record): DigiLocker Aadhaar, then e-sign of the KYC form; status works after onboarding too.
+r.post('/onb/kyc/start', limits.kycCheck, validate(s.kycStart), c.kycStart);
+r.post('/onb/kyc/refresh', limits.kycCheck, c.kycRefresh);
+r.post('/onb/kyc/esign', limits.kycCheck, c.kycEsign);
+r.get('/onb/kyc/status', limits.kycCheck, c.kycStatus);
 r.post('/onb/pan', limits.kycCheck, validate(s.pan), c.verifyPan);
 r.post('/onb/pan/confirm', c.confirmPan);
 r.post('/onb/pan/reset', c.resetPan);
