@@ -166,7 +166,15 @@ export async function uploadKycSignature(user: User) {
 
 /** The kyc-esign step: the e-sign link for the filled form. */
 export async function kycEsign(user: User) {
-  const { user: pu, kyc, error } = await refreshKyc(user);
+  let { user: pu, kyc, error } = await refreshKyc(user);
+  // Cybrilla moves a complete form to awaiting_esign a moment after its last field (the signature) arrives: a check
+  // straight after the signature step still sees `created` (sandbox 2026-10-30: 0.2 s after the upload)
+  if (kyc?.status === 'created' && kyc.signature_provided && !kyc.fields_needed?.length) {
+    const id = kyc.id;
+    const form = await poll(() => pv.get(`/poa/kyc_forms/${id}`, { quiet: true }), (f) => f?.status !== 'created', { every: 1000, max: 10000 });
+    const u = await store(user, form);
+    ({ user: pu, kyc, error } = { user: publicUser(u), kyc: u.data.kyc_form, error: kycFailText(u.data.kyc_form) });
+  }
   if (error) throw new ApiError(422, error, { kyc_status: kyc?.status });
   if (kyc?.status === 'awaiting_submission' || kyc?.status === 'submitted') return { user: pu, esign_url: null };
   if (kyc?.status !== 'awaiting_esign') {
