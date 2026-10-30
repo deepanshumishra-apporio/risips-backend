@@ -76,7 +76,8 @@ function details(u: User, geo: { latitude: number; longitude: number }) {
     citizenship_countries: ['in'],
     nationality_country: 'in',
     tax_residency_other_than_india: false, // the FATCA/CRS declaration says the same
-    geolocation: geo,
+    // Cybrilla rejects more than 6 decimal places, and phones report ~15
+    geolocation: { latitude: Number(geo.latitude.toFixed(6)), longitude: Number(geo.longitude.toFixed(6)) },
   };
 }
 
