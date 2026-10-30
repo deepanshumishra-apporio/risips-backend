@@ -57,8 +57,8 @@ export function publicUser(u: User) {
     first_name: d.name ? d.name.split(' ')[0] : null,
     dob: d.dob || null,
     gender: d.gender || null,
+    // the full PAN never leaves the server (TC 115): the app shows what the investor typed, or this
     pan_masked: maskTail(d.pan, 3),
-    pan: d.pan || null,
     aadhaar_masked: d.aadhaar_last4 ? `XXXX XXXX ${d.aadhaar_last4}` : null,
     occupation: d.occupation || null,
     income_slab: d.income_slab || null,
@@ -66,7 +66,7 @@ export function publicUser(u: User) {
     father_name: d.father_name || null,
     address: d.address || null,
     bank: d.bank ? { ...d.bank, account_masked: maskTail(d.bank.account_number, 4), account_number: undefined } : null,
-    nominee: d.nominee || null,
+    nominee: d.nominee ? { ...d.nominee, pan: maskTail(d.nominee.pan, 3) } : null,
     nominee_skipped: !!d.nominee_skipped,
     nominee_added_at: d.nominee_added_at || null,
     kyc_compliant: kycCompliant(d),

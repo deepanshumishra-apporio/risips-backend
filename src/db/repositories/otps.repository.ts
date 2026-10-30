@@ -25,15 +25,16 @@ export const otpsRepo = {
     return code;
   },
 
-  check: async (purpose: string, target: string, code: unknown): Promise<OtpResult> => {
+  /** `left`: tries this code still has (set on a wrong code). */
+  check: async (purpose: string, target: string, code: unknown): Promise<{ result: OtpResult; left?: number }> => {
     const [o] = await orm.update(otps).set({ attempts: sql`${otps.attempts} + 1` }).where(key(purpose, target))
       .returning({ code_hash: otps.code_hash, expires_at: otps.expires_at, prior: sql<number>`${otps.attempts} - 1`.mapWith(Number) });
-    if (!o || !o.code_hash) return 'missing';
-    if (o.prior >= MAX_TRIES) return 'locked';
-    if (Date.now() > o.expires_at) return 'expired';
-    if (!safeEqual(o.code_hash, hash(purpose, target, String(code)))) return 'wrong';
+    if (!o || !o.code_hash) return { result: 'missing' };
+    if (o.prior >= MAX_TRIES) return { result: 'locked' };
+    if (Date.now() > o.expires_at) return { result: 'expired' };
+    if (!safeEqual(o.code_hash, hash(purpose, target, String(code)))) return { result: 'wrong', left: MAX_TRIES - o.prior - 1 };
     const used = await orm.delete(otps).where(and(key(purpose, target), eq(otps.code_hash, o.code_hash))).returning({ purpose: otps.purpose });
-    return used.length ? 'ok' : 'missing'; // a parallel request used it first
+    return { result: used.length ? 'ok' : 'missing' }; // a parallel request used it first
   },
 
   /** Deletes codes that expired over an hour ago; returns how many. */

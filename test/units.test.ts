@@ -13,7 +13,37 @@ const { authSchemas } = await import('../src/validation/auth.validation.ts');
 const { ordersSchemas } = await import('../src/validation/orders.validation.ts');
 const { errorHandler } = await import('../src/middleware/errorHandler.ts');
 const { FpError } = await import('../src/integrations/fp.client.ts');
-const { nextStep, kycStatus } = await import('../src/services/user.service.ts');
+const { nextStep, kycStatus, publicUser } = await import('../src/services/user.service.ts');
+const { pincodeMatchesState } = await import('../src/utils/pincode.ts');
+const { fundsSchemas } = await import('../src/validation/funds.validation.ts');
+
+describe('tester fixes 2026-10-30', () => {
+  it('stores +91 / 0-prefixed mobiles as the same 10 digits (RSP-AUTH-001)', () => {
+    const m = authSchemas.mobileStart.body;
+    for (const v of ['+919876501234', '09876501234', '98765 01234']) assert.equal(m.parse({ mobile: v }).mobile, '9876501234');
+  });
+  it('never returns the full PAN, the investor’s or the nominee’s (RSP-ONB-003)', () => {
+    const u = publicUser({ id: 1, email: 'a@b.c', mobile: null, pin_hash: null, created_at: '2026-01-01 00:00:00',
+      data: { pan: 'ABCPD3751E', nominee: { name: 'N', dob: '1990-01-01', relationship: 'mother', pan: 'XYZPQ1234R' } } });
+    const s = JSON.stringify(u);
+    assert.ok(!s.includes('ABCPD3751E') && !s.includes('XYZPQ1234R'), s);
+    assert.equal(u.pan_masked, '*******51E');
+  });
+  it('rejects pincodes whose state does not fit their postal region (RSP-ONB-004)', () => {
+    assert.ok(pincodeMatchesState('110001', 'DELHI'));
+    assert.ok(pincodeMatchesState('503001', 'TELANGANA'));
+    assert.ok(pincodeMatchesState('560034', 'KARNATAKA'));
+    assert.ok(!pincodeMatchesState('999999', 'TELANGANA'), '999999 is not a Telangana pincode');
+    assert.ok(!pincodeMatchesState('123456', 'DELHI'), '12xxxx is Haryana');
+  });
+  it('refuses a third fund in compare instead of dropping it (RSP-FND-001)', () => {
+    const q = fundsSchemas.compare.query;
+    assert.equal(q.safeParse({ isins: 'INF109K01BL4,INF109K01PI0' }).success, true);
+    const three = q.safeParse({ isins: 'INF109K01BL4,INF109K01PI0,INF209K01BR9' });
+    assert.equal(three.success, false);
+    assert.match(JSON.stringify(three.error), /up to 2 funds/);
+  });
+});
 
 describe('onboarding steps', () => {
   const base = {

@@ -96,6 +96,13 @@ and turned into `{ error, ...extra }` by `middleware/errorHandler.ts`.
 
 - **Validation:** every input goes through a zod schema; unknown fields are dropped. A bad body or query is a 400 with
   `{ error, reason: 'validation', fields }`; a malformed id in the path is a 404.
+  - Mobile numbers may come with `+91`, a leading `0` or spaces: they are stored as the last 10 digits, so the
+    duplicate-mobile check (409) sees `+919876501234`, `09876501234` and `9876501234` as one number.
+  - Dates are `YYYY-MM-DD` (the app converts what the investor types as DD/MM/YYYY).
+  - `GET /funds/compare?isins=a,b` takes at most 2 funds; a third is a 400.
+  - A pincode is accepted only when FP knows it and its state fits the pincode's postal region (FP has junk rows,
+    such as 999999), `utils/pincode.ts`.
+- **Sensitive data:** the full PAN is never in a response: `pan_masked` (and a masked `nominee.pan`) only.
 - **Rate limits** (`middleware/rateLimit.ts`): 300 req/min per IP overall; sign-in codes 20 per email and 20 per IP
   per hour; code checks 60 per IP per hour; PIN tries 10 per user per 15 min; KYC checks 30 per user per hour; orders
   and plans 30 per user per 10 min. The counters are in memory: with more than one instance, add a shared store (Redis).

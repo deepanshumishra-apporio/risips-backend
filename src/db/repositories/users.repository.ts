@@ -20,6 +20,10 @@ export const usersRepo = {
   byEmail: async (email: string): Promise<User | null> => first(await orm.select().from(users).where(eq(users.email, email))),
   create: async (email: string): Promise<User> => (await orm.insert(users).values({ email }).returning())[0],
 
+  /** Another live account that has verified this mobile (an erased account keeps its number but doesn't count). */
+  mobileTakenBy: async (mobile: string, exceptId: number): Promise<number | null> => first(await orm.select({ id: users.id }).from(users)
+    .where(sql`${users.mobile} = ${mobile} AND ${users.id} <> ${exceptId} AND coalesce(${users.data}->'deletion'->>'status', '') <> 'deleted'`))?.id ?? null,
+
   setMobile: (id: number, mobile: string) => orm.update(users).set({ mobile }).where(eq(users.id, id)),
   setPinHash: (id: number, pinHash: string) => orm.update(users).set({ pin_hash: pinHash }).where(eq(users.id, id)),
 

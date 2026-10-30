@@ -27,6 +27,24 @@ describe('headers', () => {
   });
 });
 
+describe('one mobile per account', () => {
+  it('refuses a mobile another account verified, in any format', async () => {
+    const mobile = `9${String(Date.now()).slice(-9)}`;
+    const a = await signUp(t);
+    const s = await t.call('POST', '/auth/mobile/start', { mobile }, a.token);
+    assert.equal((await t.call('POST', '/auth/mobile/verify', { mobile, code: s.json!.dev_otp }, a.token)).status, 200);
+    const b = await signUp(t);
+    for (const m of [mobile, `+91${mobile}`, `0${mobile}`]) {
+      const r = await t.call('POST', '/auth/mobile/start', { mobile: m }, b.token);
+      assert.equal(r.status, 409, m);
+      assert.equal(r.json!.reason, 'mobile_taken');
+      assert.equal(r.json!.dev_otp, undefined, 'no code sent');
+    }
+    // the owner's own number is not "taken" (a 429 here is only the 30 s gap between codes)
+    assert.notEqual((await t.call('POST', '/auth/mobile/start', { mobile }, a.token)).json!.reason, 'mobile_taken');
+  });
+});
+
 describe('request bodies and errors', () => {
   it('answers 404 JSON for unknown routes', async () => {
     const r = await t.call('GET', '/nope');

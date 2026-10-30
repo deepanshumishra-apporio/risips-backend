@@ -14,8 +14,9 @@ export const fundsSchemas = {
   },
   compare: {
     query: z.object({
-      isins: z.string({ error: 'Fund not found' }).max(60).transform((v) => v.split(',').filter(Boolean).slice(0, 2))
-        .pipe(z.array(isin).min(1, 'Fund not found')),
+      // the compare screen is two funds side by side (Figma): a third is refused, not silently dropped
+      isins: z.string({ error: 'Fund not found' }).max(60).transform((v) => v.split(',').filter(Boolean))
+        .pipe(z.array(isin).min(1, 'Fund not found').max(2, 'You can compare up to 2 funds.')),
     }),
   },
   detail: { params: z.object({ isin }), query: z.object({ period: q(5) }) },

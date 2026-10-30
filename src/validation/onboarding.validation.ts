@@ -27,7 +27,7 @@ export const onboardingSchemas = {
     body: z.object({
       pan: text('Enter a valid individual PAN (e.g. ABCPX1234K).').trim().toUpperCase().regex(INDIVIDUAL_PAN, 'Enter a valid individual PAN (e.g. ABCPX1234K).'),
       name: text('Enter your full name as on PAN (letters only).').transform(collapse).refine((n) => /^[A-Za-z][A-Za-z .']{2,69}$/.test(n), 'Enter your full name as on PAN (letters only).'),
-      dob: realDate('Enter a valid date of birth (DD/MM/YYYY).'),
+      dob: realDate('Enter a valid date of birth (YYYY-MM-DD).'),
       // Sent by app versions that have the fresh-KYC screens; older ones keep the "fresh KYC needed" stop.
       fresh_kyc: z.boolean().optional().default(false),
     }),
@@ -92,7 +92,7 @@ export const onboardingSchemas = {
       if (b.skip) return;
       const fail = (path: string, message: string) => ctx.addIssue({ code: 'custom', path: [path], message });
       if (!/^[A-Za-z ]{3,40}$/.test(collapse(b.name || ''))) fail('name', 'Enter the nominee’s full name (letters only).');
-      else if (ageOf(b.dob || '') === null) fail('dob', 'Enter a valid date of birth for the nominee (DD/MM/YYYY).');
+      else if (ageOf(b.dob || '') === null) fail('dob', 'Enter a valid date of birth for the nominee (YYYY-MM-DD).');
       else if (!(RELATIONSHIPS as readonly string[]).includes(b.relationship || '')) fail('relationship', 'Select the relationship.');
       else if (!ANY_PAN.test((b.pan || '').toUpperCase().trim())) fail('pan', 'Enter the nominee’s PAN (required as identity proof).');
     }).transform((b) => ({

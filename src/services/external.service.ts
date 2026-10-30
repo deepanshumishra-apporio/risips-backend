@@ -60,7 +60,8 @@ async function statusView(user: User) {
     status: st.status || (imp ? 'ready' : 'none'),
     provider: p?.name || null,
     available: !!p,
-    pan: user.data.pan || st.pan || null,
+    // the KYC PAN is shown masked (pan_masked); only a PAN the investor typed here for the import comes back
+    pan: user.data.pan ? null : st.pan || null,
     pan_masked: maskPan(user.data.pan || st.pan),
     pan_locked: !!user.data.pan,
     mobile: user.mobile || null,

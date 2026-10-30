@@ -84,14 +84,30 @@ function limitOtpIssue(purpose: string, target: string) {
   record(key);
 }
 
-/** otpsRepo.check, plus the cap on wrong codes across every code issued for this purpose + target. */
-async function checkOtp(purpose: string, target: string, code: unknown): Promise<OtpResult> {
+/** Wrong codes still allowed before the cap across codes blocks this purpose + target. */
+function wrongLeft(key: string, now = Date.now()) {
+  const ts = hits.get(key) || [];
+  return Math.max(0, Math.min(...OTP_WRONG.map(([max, ms]) => max - ts.filter((t) => now - t < ms).length)));
+}
+
+/**
+ * otpsRepo.check, plus the cap on wrong codes across every code issued for this purpose + target. On a wrong code,
+ * `left` is how many more tries this code has (the lower of its own 5 and the cap across codes).
+ */
+async function checkOtp(purpose: string, target: string, code: unknown): Promise<{ result: OtpResult; left?: number }> {
   const key = `otp-wrong:${purpose}:${target}`;
   const s = waitFor(key, OTP_WRONG);
   if (s) throw tooMany('Too many wrong codes.', s);
-  const result = await otpsRepo.check(purpose, target, code);
-  if (result === 'wrong') record(key);
-  return result;
+  const r = await otpsRepo.check(purpose, target, code);
+  if (r.result !== 'wrong') return r;
+  record(key);
+  return { result: 'wrong', left: Math.min(r.left ?? 0, wrongLeft(key)) };
+}
+
+/** "Incorrect code. 3 attempts left." (the last wrong try asks for a new code, or says the wait is next). */
+function wrongText(base: string, left: number) {
+  if (left > 0) return `${base} ${left} attempt${left === 1 ? '' : 's'} left.`;
+  return `${base} No attempts left: request a new code.`;
 }
 
 // ---------- sign-in codes ----------
@@ -116,13 +132,14 @@ export async function sendAadhaarOtp(userId: number) {
 }
 
 export const LOGIN_OTP_ERRORS: Record<Exclude<OtpResult, 'ok'>, string> = {
-  wrong: 'Incorrect code. Please try again.', expired: 'Code expired. Tap Resend Code.',
+  wrong: 'Incorrect code.', expired: 'Code expired. Tap Resend Code.',
   missing: 'Please request a new code.', locked: 'Too many attempts. Request a new code.',
 };
 
-/** Checks a sign-in code; throws a 400 with `reason` when it isn't right. */
+/** Checks a sign-in code; throws a 400 with `reason` (and `attempts_left` on a wrong code) when it isn't right. */
 export async function checkLoginOtp(purpose: string, target: string, code: unknown) {
-  const result = await checkOtp(purpose, target, code);
+  const { result, left } = await checkOtp(purpose, target, code);
+  if (result === 'wrong') throw new ApiError(400, wrongText(LOGIN_OTP_ERRORS.wrong, left!), { reason: result, attempts_left: left });
   if (result !== 'ok') throw new ApiError(400, LOGIN_OTP_ERRORS[result], { reason: result });
 }
 
@@ -154,10 +171,11 @@ export async function requireTxnOtp(user: User, action: TxnAction, code: string 
   if (code === undefined || code === null || code === '') {
     throw new ApiError(400, 'Confirm this with the OTP sent to your registered mobile and email.', { reason: 'otp_required' });
   }
-  const v = await checkOtp(`txn:${action}`, String(user.id), String(code));
+  const { result: v, left } = await checkOtp(`txn:${action}`, String(user.id), String(code));
+  if (v === 'wrong') throw new ApiError(400, wrongText('That OTP is not correct.', left!), { reason: v, attempts_left: left });
   if (v !== 'ok') {
     throw new ApiError(400, {
-      wrong: 'That OTP is not correct.', locked: 'Too many wrong attempts. Request a new OTP.',
+      locked: 'Too many wrong attempts. Request a new OTP.',
       expired: 'This OTP has expired. Request a new one.', missing: 'This OTP has already been used or expired. Request a new one.',
     }[v], { reason: v });
   }

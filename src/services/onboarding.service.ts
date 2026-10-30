@@ -6,6 +6,8 @@ import { MfInvestmentAccount, RelatedParty } from '../integrations/fp.schemas.ts
 import { ApiError } from '../utils/errors.ts';
 import { ageOf } from '../utils/format.ts';
 import { log } from '../utils/logger.ts';
+import { maskTail } from '../utils/mask.ts';
+import { pincodeMatchesState } from '../utils/pincode.ts';
 import { saveImage } from './files.service.ts';
 import { runPreVerification, uploadKycSignature } from './kyc.service.ts';
 import { checkLoginOtp, requireTxnOtp, sendAadhaarOtp } from './otp.service.ts';
@@ -40,6 +42,8 @@ export async function verifyPan(user: User, { pan, name, dob, fresh_kyc = false 
     date_of_birth: { value: dob },
   });
   const checks = { readiness: o.readiness, pan: o.pan, name: o.name, date_of_birth: o.date_of_birth };
+  // what the app gets: the same results without FP's echo of the full PAN
+  const shown = { ...checks, pan: o.pan && { ...o.pan, value: maskTail(o.pan.value, 3) } };
   const failed = Object.entries(checks).filter(([, v]) => v?.status !== 'verified');
   // No KYC at the KRA but PAN, name and DOB check out: the investor goes on with a fresh KYC (kyc.service.ts).
   // Other readiness failures (on hold, rejected, legacy, ...) need the KRA record fixed, which this app can't do.
@@ -54,12 +58,12 @@ export async function verifyPan(user: User, { pan, name, dob, fresh_kyc = false 
     else if (k === 'name' && v?.status) msg = 'The name does not match PAN records. Enter it exactly as on your PAN card.';
     else if (k === 'date_of_birth' && v?.status) msg = 'The date of birth does not match PAN records.';
     await usersRepo.merge(user.id, { pan_attempt: { pan, pv_id: o.id, checks } });
-    throw new ApiError(422, msg, { checks, pv_id: o.id });
+    throw new ApiError(422, msg, { checks: shown, pv_id: o.id });
   }
   // A different PAN drops the KYC form started for the previous one.
   const keepForm = user.data.pan === pan ? {} : { kyc_form: undefined, aadhaar_verified: false };
   const u = await usersRepo.merge(user.id, { pan, name, dob, pan_verified: true, pan_pv_id: o.id, pan_checks: checks, pan_confirmed: false, kyc_fresh: fresh, ...keepForm });
-  return { user: publicUser(u), checks, pv_id: o.id, kyc_fresh: fresh };
+  return { user: publicUser(u), checks: shown, pv_id: o.id, kyc_fresh: fresh };
 }
 
 export async function confirmPan(user: User) {
@@ -67,9 +71,15 @@ export async function confirmPan(user: User) {
   return { user: publicUser(await usersRepo.merge(user.id, { pan_confirmed: true })) };
 }
 
+/** "No, edit PAN": clears the PAN and what came with it, so nothing of it (KYC status, a KYC form) carries over. */
 export async function resetPan(user: User) {
   if (user.data.pan_confirmed) throw new ApiError(409, 'Your PAN is already confirmed and can not be edited.');
-  return { user: publicUser(await usersRepo.merge(user.id, { pan_verified: false, pan_confirmed: false })) };
+  return {
+    user: publicUser(await usersRepo.merge(user.id, {
+      pan: undefined, name: undefined, dob: undefined, pan_verified: false, pan_confirmed: false, pan_pv_id: undefined, pan_checks: undefined,
+      kyc_fresh: undefined, kyc_form: undefined, aadhaar_verified: false,
+    })),
+  };
 }
 
 // ---------- profile and address ----------
@@ -80,16 +90,24 @@ export async function updateProfile(user: User, patch: Partial<Pick<UserData, 'o
   return { user: publicUser(await usersRepo.merge(user.id, clean)) };
 }
 
-export async function pincodeLookup(pin: string) {
+/** FP's pincode lookup, or null when it has no row or its row can't be right (utils/pincode.ts). */
+async function findPincode(pin: string): Promise<{ city: string; state: string } | null> {
   const p = await fp.get(`/api/onb/pincodes/${pin}`, { label: 'pincode lookup' }).catch(orNull);
-  if (!p?.city && !p?.state_name) throw new ApiError(404, 'Pincode not found.');
+  if (!p?.city && !p?.state_name) return null;
+  if (!pincodeMatchesState(pin, p.state_name)) return null;
   return { city: p.city || p.district, state: p.state_name };
 }
 
+export async function pincodeLookup(pin: string) {
+  const p = await findPincode(pin);
+  if (!p) throw new ApiError(404, 'Pincode not found.');
+  return p;
+}
+
 export async function saveAddress(user: User, { line1, line2, pincode, gender }: { line1: string; line2: string; pincode: string; gender: string }) {
-  const p = await fp.get(`/api/onb/pincodes/${pincode}`, { label: 'pincode lookup' }).catch(orNull);
-  if (!p?.city && !p?.state_name) throw new ApiError(400, 'Pincode not found.');
-  const address = { line1, line2, pincode, city: p.city || p.district, state: p.state_name };
+  const p = await findPincode(pincode);
+  if (!p) throw new ApiError(400, 'Pincode not found.');
+  const address = { line1, line2, pincode, city: p.city, state: p.state };
   return { user: publicUser(await usersRepo.merge(user.id, { address, gender })) };
 }
 
@@ -143,7 +161,11 @@ export async function verifyBank(user: User, { account_number, ifsc }: { account
       ? 'Bank verification is taking longer than usual. Please try again, or use another account.'
       : st.code === 'low_confidence' || st.code === 'uncertain'
         ? 'We could not confirm this account belongs to you. Please use another account in your name.'
-        : 'Bank verification failed. Please check the account number and IFSC.';
+        // FP blocks an account number for everyone after 3 failed checks on it (seen 2026-10-30); it says nothing
+        // about when the block ends, so the investor is pointed at another account
+        : st.code === 'verification_attempt_limit_exceeded'
+          ? 'This account has had too many verification attempts and can’t be verified right now. Please use another account in your name.'
+          : 'Bank verification failed. Please check the account number and IFSC.';
     throw new ApiError(422, msg, { bank_status: bank.status, code: bank.code, pv_id: o.id });
   }
   bank.verified = true;

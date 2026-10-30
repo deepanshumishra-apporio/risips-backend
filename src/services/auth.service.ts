@@ -37,14 +37,23 @@ export async function verifyEmail(email: string, code: string, device: DeviceInf
   return { token, is_new: isNew, user: publicUser(user), ...(cancelled ? { deletion_cancelled: true } : {}) };
 }
 
+/** One mobile per account: a number another live account has verified is refused (before a code is sent, and again on verify). */
+async function assertMobileFree(user: User, mobile: string) {
+  if (await usersRepo.mobileTakenBy(mobile, user.id)) {
+    throw new ApiError(409, 'This mobile number is already registered with another Risips account. Please use a different number.', { reason: 'mobile_taken' });
+  }
+}
+
 export async function startMobile(user: User, mobile: string) {
   // The FP investor profile holds the verified number; changing it here would not reach FP.
   if (user.data.onboarded_at && mobile !== user.mobile) throw new ApiError(409, 'Your mobile number is already registered. Contact support to change it.');
+  await assertMobileFree(user, mobile);
   return { ok: true, expires_in: 120, ...(await sendLoginOtp('mobile', `${user.id}:${mobile}`, { mobile })) };
 }
 
 export async function verifyMobile(user: User, mobile: string, code: string, bankConsent: boolean) {
   await checkLoginOtp('mobile', `${user.id}:${mobile}`, code);
+  await assertMobileFree(user, mobile); // another account may have verified it since the code was sent
   await usersRepo.setMobile(user.id, mobile);
   const u = await usersRepo.merge(user.id, { mobile_verified: true, bank_consent: bankConsent });
   return { user: publicUser(u) };

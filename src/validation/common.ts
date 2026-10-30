@@ -38,7 +38,7 @@ export const folio = z.string({ error: 'Folio is required.' }).trim().min(1, 'Fo
   .regex(/^[A-Za-z0-9/ -]+$/, 'Folio is required.');
 
 /** yyyy-mm-dd */
-export const isoDate = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter a valid date (DD/MM/YYYY).');
+export const isoDate = z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter a valid date (YYYY-MM-DD).');
 
 export const yesNo = z.boolean({ error: 'Must be true or false.' });
 
